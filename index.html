@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>球在谁手里 · Tracker</title>
+<style>
+:root{
+  --bg:#FAFAFA; --card:#FFFFFF; --ink:#09090B; --ink2:#3F3F46; --ink3:#71717A;
+  --line:#E4E4E7; --accent:#2563EB; --accent-soft:#EFF6FF;
+  --warn:#B45309; --warn-bg:#FEF3C7; --late:#B91C1C; --late-bg:#FEE2E2;
+  --ok:#15803D; --ok-bg:#DCFCE7;
+  --r:10px; --shadow:0 1px 2px rgba(0,0,0,.05);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+button{font:inherit;cursor:pointer}
+a{color:var(--accent)}
+.wrap{max-width:1060px;margin:0 auto;padding:24px 20px 80px}
+
+/* ---- header ---- */
+header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+header h1{font-size:22px;margin:0;letter-spacing:.5px}
+header .sub{color:var(--ink3);font-size:13px}
+header .spacer{flex:1}
+.btn{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:6px 14px;color:var(--ink2);transition:border-color .15s,color .15s}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:#1D4ED8}
+.btn:focus-visible,.icobtn:focus-visible,.chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---- stats strip ---- */
+.stats{display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin:14px 0 12px;padding:12px 16px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+.count{font-size:13px;color:var(--ink2);white-space:nowrap}
+.count b{font-size:19px;color:var(--ink);margin-right:2px}
+.count.alert b{color:var(--late)}
+
+/* ---- pipeline flow ---- */
+.pipe{display:flex;align-items:stretch;gap:4px;margin:0 0 14px;overflow-x:auto;padding-bottom:2px}
+.pnode{flex:1;min-width:96px;position:relative;border:1px solid var(--line);background:var(--card);border-radius:var(--r);padding:10px 8px 8px;text-align:center;box-shadow:var(--shadow);transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:1px}
+.pnode::before{content:"";position:absolute;top:0;left:10px;right:10px;height:3px;border-radius:0 0 3px 3px;background:var(--pc,var(--line))}
+.pnode:hover{border-color:var(--accent)}
+.pnode.on{background:var(--accent-soft);border-color:var(--accent)}
+.pnode.zero{opacity:.45}
+.pnode b{font-size:22px;line-height:1.2;color:var(--ink)}
+.pnode.on b{color:var(--accent)}
+.pnode small{font-size:12px;color:var(--ink2);white-space:nowrap}
+.pnode .plate{font-size:11px;color:var(--late);min-height:14px}
+.parrow{align-self:center;color:var(--ink3);flex:0 0 auto;display:flex}
+
+/* ---- undo toast ---- */
+.toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,calc(100% + 40px));background:var(--ink);color:#fff;border-radius:10px;padding:12px 16px;display:flex;align-items:center;gap:14px;z-index:90;box-shadow:0 8px 30px rgba(0,0,0,.3);transition:transform .25s ease;max-width:min(560px,90vw)}
+.toast.show{transform:translate(-50%,0)}
+@media (prefers-reduced-motion:reduce){.toast{transition:none}}
+.toast .tmsg{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toast .tundo{border:1px solid rgba(255,255,255,.4);background:none;color:#fff;border-radius:7px;padding:4px 14px;font-size:13.5px;white-space:nowrap;transition:background .15s}
+.toast .tundo:hover{background:rgba(255,255,255,.15)}
+.toast .tbar{position:absolute;left:10px;right:10px;bottom:3px;height:2px;border-radius:1px;background:rgba(255,255,255,.2);overflow:hidden}
+.toast .tbar i{display:block;height:100%;background:#fff;width:100%}
+.toast.show .tbar i{animation:tshrink 15s linear forwards}
+@keyframes tshrink{from{width:100%}to{width:0}}
+
+/* ---- filter chips ---- */
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
+.chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:3px 13px;font-size:13px;color:var(--ink2);transition:all .15s}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+.chip.on{background:var(--ink);border-color:var(--ink);color:#fff}
+
+/* ---- groups ---- */
+.group{margin-bottom:26px}
+.group h2{font-size:14px;font-weight:600;color:var(--ink2);margin:0 0 8px;display:flex;align-items:center;gap:8px}
+.group h2 .n{background:var(--line);border-radius:999px;padding:0 9px;font-size:12px;color:var(--ink2)}
+.group.me h2{color:var(--accent)}
+.group.me h2 .n{background:var(--accent-soft);color:var(--accent)}
+.rows{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:11px 16px;border-bottom:1px solid var(--line);transition:background .15s}
+.row:last-child{border-bottom:none}
+.row:hover{background:#F8F8F8}
+.row .code{font-weight:650;white-space:nowrap;cursor:pointer;border:none;background:none;padding:0;font-size:15.5px;color:var(--ink)}
+.row .code:hover{color:var(--accent)}
+.row .what{flex:1;color:var(--ink2);min-width:0}
+.row .who{color:var(--ink3);font-size:13.5px;white-space:nowrap}
+.age{font-size:12.5px;padding:2px 9px;border-radius:999px;background:#F4F4F5;color:var(--ink3);white-space:nowrap;display:inline-flex;align-items:center;gap:4px}
+.age.warn{background:var(--warn-bg);color:var(--warn)}
+.age.late{background:var(--late-bg);color:var(--late);font-weight:600}
+.icobtn{border:none;background:none;padding:5px;border-radius:6px;color:var(--ink3);display:inline-flex;transition:all .15s}
+.icobtn:hover{background:var(--accent-soft);color:var(--accent)}
+.icobtn svg{width:17px;height:17px}
+.empty{padding:22px 16px;color:var(--ink3);font-size:14px}
+
+/* idle + closed */
+.idlerow .what{font-style:normal;color:var(--ink3)}
+details.closed{margin-top:30px;color:var(--ink3)}
+details.closed summary{cursor:pointer;font-size:13.5px;padding:4px 0}
+details.closed .row{opacity:.75}
+
+/* ---- drawer ---- */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.25);opacity:0;pointer-events:none;transition:opacity .2s;z-index:40}
+.overlay.show{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(560px,94vw);background:var(--card);border-left:1px solid var(--line);z-index:50;transform:translateX(102%);transition:transform .22s ease;overflow-y:auto;padding:26px 26px 60px}
+.drawer.show{transform:none}
+@media (prefers-reduced-motion:reduce){.drawer,.overlay{transition:none}}
+.drawer .dcode{font-size:21px;font-weight:700;margin:0}
+.drawer .dtitle{color:var(--ink2);margin:4px 0 14px}
+.meta{display:flex;gap:8px;flex-wrap:wrap;font-size:12.5px;margin-bottom:18px}
+.meta span{background:#F4F4F5;border-radius:6px;padding:3px 10px;color:var(--ink2)}
+.meta span.stage{background:var(--accent-soft);color:var(--accent)}
+.dsec{margin:20px 0}
+.dsec h3{font-size:13px;color:var(--ink3);font-weight:600;margin:0 0 8px;text-transform:uppercase;letter-spacing:.5px}
+.dwait{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:14.5px}
+.dwait:last-child{border-bottom:none}
+.dwait.done{color:var(--ink3);text-decoration:line-through}
+.dwait .flex{flex:1}
+.tl{font-size:13.5px;color:var(--ink2)}
+.tl li{margin:5px 0;list-style:none}
+.tl ul{margin:0;padding:0}
+.tl .ts{color:var(--ink3);font-size:12px;margin-right:8px;font-variant-numeric:tabular-nums}
+.refs a{display:block;font-size:13.5px;margin:4px 0;word-break:break-all}
+.notebox{border:1px solid var(--line);border-radius:8px;margin:8px 0}
+.notebox summary{padding:7px 12px;cursor:pointer;font-size:13.5px;color:var(--ink2)}
+.notebox pre{margin:0;padding:10px 14px;border-top:1px solid var(--line);white-space:pre-wrap;font:12.5px/1.5 Consolas,monospace;color:var(--ink2);max-height:340px;overflow:auto}
+.dactions{display:flex;gap:8px;flex-wrap:wrap;margin-top:24px}
+.xclose{position:absolute;top:16px;right:18px}
+
+/* ---- dialog ---- */
+dialog{border:1px solid var(--line);border-radius:12px;padding:24px;max-width:430px;width:92vw;box-shadow:0 10px 40px rgba(0,0,0,.15)}
+dialog::backdrop{background:rgba(0,0,0,.25)}
+dialog h3{margin:0 0 14px;font-size:16px}
+dialog label{display:block;font-size:13px;color:var(--ink2);margin:10px 0 3px}
+dialog input,dialog select,dialog textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:14px}
+dialog input:focus,dialog select:focus,dialog textarea:focus{outline:2px solid var(--accent);border-color:transparent}
+dialog .dlgbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.err{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--late);color:#fff;padding:9px 18px;border-radius:8px;font-size:14px;z-index:99;display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>球在谁手里</h1>
+    <span class="sub" id="todaySub"></span>
+    <span class="spacer"></span>
+    <button class="btn primary" onclick="dlgAddProject()">＋ 新项目</button>
+  </header>
+
+  <div class="stats" id="stats"></div>
+  <nav class="pipe" id="pipe" aria-label="销售管道"></nav>
+  <div class="chips" id="chips"></div>
+  <main id="groups"></main>
+  <details class="closed" id="closedBox" hidden>
+    <summary></summary>
+    <div class="rows" id="closedRows" style="margin-top:8px"></div>
+  </details>
+</div>
+
+<div class="overlay" id="overlay" onclick="closeDrawer()"></div>
+<aside class="drawer" id="drawer" aria-label="项目详情"></aside>
+<dialog id="dlg"></dialog>
+<div class="err" id="err" role="alert"></div>
+<div class="toast" id="toast" role="status">
+  <span class="tmsg" id="toastMsg"></span>
+  <button class="tundo" onclick="doUndo()">撤回</button>
+  <div class="tbar"><i></i></div>
+</div>
+
+<script>
+"use strict";
+const PARTY = {me:"轮到我", customer:"等客户", vendor:"等供应商", internal:"等内部同事"};
+const ORDER = ["me","customer","vendor","internal"];
+const ICON = {
+  check:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  bell:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>',
+  clock:'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+  link:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
+  arrow:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>'
+};
+const STAGE_COLORS = ["#2563EB","#7C3AED","#0891B2","#D97706","#DB2777","#059669","#64748B","#9333EA"];
+let S = null, filterCat = null, filterStage = null;
+
+const esc = s => (s??"").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function load(){
+  const r = await fetch("/api/state");
+  S = await r.json();
+  render();
+}
+async function cmd(action, args, desc){
+  const r = await fetch("/api/cmd",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,args})});
+  const j = await r.json();
+  if(!r.ok){ showErr(j.error||"操作失败"); return false; }
+  S = j; render();
+  if(action !== "undo" && desc !== false) showToast(desc || "已保存");
+  return true;
+}
+function showErr(m){
+  const e = document.getElementById("err");
+  e.textContent = m; e.style.display="block";
+  setTimeout(()=>e.style.display="none", 4000);
+}
+
+/* ---------- undo toast ---------- */
+let toastTimer = null;
+function showToast(msg){
+  const t = document.getElementById("toast");
+  document.getElementById("toastMsg").textContent = msg;
+  t.classList.remove("show");
+  void t.offsetWidth;            // 重启进度条动画
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, 15000);
+}
+function hideToast(){
+  clearTimeout(toastTimer);
+  document.getElementById("toast").classList.remove("show");
+}
+async function doUndo(){
+  hideToast();
+  if(await cmd("undo", {})){
+    const t = document.getElementById("toast");
+    document.getElementById("toastMsg").textContent = "已撤回";
+    t.querySelector(".tundo").style.display = "none";
+    t.classList.add("show");
+    toastTimer = setTimeout(()=>{ hideToast(); t.querySelector(".tundo").style.display=""; }, 2500);
+  }
+}
+
+function ageBadge(w){
+  const stale = S.stale_days, cls = w.age >= stale*2 ? "late" : w.age >= stale ? "warn" : "";
+  const nudged = w.nudged_at ? `，${w.nudged_at.slice(5)}催过` : "";
+  return `<span class="age ${cls}" title="自 ${esc(w.since)}${nudged}">${ICON.clock}${w.age}天${w.nudged_at?" ·催过":""}</span>`;
+}
+
+function render(){
+  document.getElementById("todaySub").textContent = `${S.today} · 超${S.stale_days}天变黄，超${S.stale_days*2}天变红`;
+  const active = S.projects.filter(p=>p.status==="active");
+  const closed = S.projects.filter(p=>p.status==="closed");
+  const cats = [...new Set(active.map(p=>p.category).filter(Boolean))];
+  if(filterCat && !cats.includes(filterCat)) filterCat = null;
+  const catShown = filterCat ? active.filter(p=>p.category===filterCat) : active;
+
+  // pipeline flow: 节点按 catShown 计数, 不受 stage 筛选影响
+  const pipeStages = S.pipeline_stages;
+  const stageOf = p => pipeStages.includes(p.stage) ? p.stage : "__other";
+  if(filterStage && filterStage!=="__other" && !pipeStages.includes(filterStage)) filterStage = null;
+  const shown = filterStage ? catShown.filter(p=>stageOf(p)===filterStage) : catShown;
+
+  const openWaits = [];
+  shown.forEach(p => p.waits.filter(w=>!w.done).forEach(w=>openWaits.push({p,w})));
+  const lateN = openWaits.filter(x=>x.w.age>=S.stale_days).length;
+  document.getElementById("stats").innerHTML = `
+    <span class="count"><b>${shown.length}</b>个进行中</span>
+    <span class="count"><b>${openWaits.filter(x=>x.w.party==="me").length}</b>项轮到我</span>
+    <span class="count ${lateN?"alert":""}"><b>${lateN}</b>项等太久</span>
+    ${filterStage||filterCat?`<span class="count" style="color:var(--accent)">筛选中: ${esc(filterCat||"")} ${esc(filterStage==="__other"?"其他":filterStage||"")}</span>`:""}`;
+
+  const pnode = (key, label, i) => {
+    const ps = catShown.filter(p=>stageOf(p)===key);
+    const late = ps.filter(p=>p.waits.some(w=>!w.done && w.age>=S.stale_days)).length;
+    const names = ps.map(p=>p.code).join("、") || "空";
+    return `<button class="pnode ${filterStage===key?"on":""} ${ps.length?"":"zero"}"
+      style="--pc:${STAGE_COLORS[i%8]}" title="${esc(names)}" aria-pressed="${filterStage===key}"
+      onclick="filterStage = filterStage==='${esc(key)}' ? null : '${esc(key)}'; render()">
+      <b>${ps.length}</b><small>${esc(label)}</small>
+      <span class="plate">${late?`${late} 项超时`:""}</span></button>`;
+  };
+  document.getElementById("pipe").innerHTML =
+    pipeStages.map((s,i)=>pnode(s,s,i)).join(`<span class="parrow" aria-hidden="true">${ICON.arrow}</span>`)
+    + `<span class="parrow" aria-hidden="true"></span>` + pnode("__other","其他",pipeStages.length);
+
+  // category chips
+  document.getElementById("chips").innerHTML = cats.length<2 ? "" :
+    [`<button class="chip ${!filterCat?"on":""}" onclick="filterCat=null;render()">全部 ${active.length}</button>`,
+     ...cats.map(c=>`<button class="chip ${filterCat===c?"on":""}" onclick="filterCat='${esc(c)}';render()">${esc(c)} ${active.filter(p=>p.category===c).length}</button>`)].join("");
+
+  // groups
+  const groups = {me:[],customer:[],vendor:[],internal:[]};
+  const idle = [];
+  shown.forEach(p=>{
+    const ws = p.waits.filter(w=>!w.done);
+    if(!ws.length) idle.push(p);
+    ws.forEach(w=>groups[w.party].push({p,w}));
+  });
+  for(const k of ORDER) groups[k].sort((a,b)=>b.w.age-a.w.age);
+
+  let html = "";
+  for(const k of ORDER){
+    const items = groups[k];
+    html += `<section class="group ${k}"><h2>${PARTY[k]} <span class="n">${items.length}</span></h2><div class="rows">`;
+    html += items.length ? items.map(({p,w})=>`
+      <div class="row">
+        <button class="code" onclick="openDrawer(${p.id})">${esc(p.code)}</button>
+        <span class="what">${esc(w.what)}</span>
+        ${w.who?`<span class="who">@${esc(w.who)}</span>`:""}
+        ${ageBadge(w)}
+        ${k!=="me"?`<button class="icobtn" title="记录催促" aria-label="催促" onclick="doNudge(${w.id})">${ICON.bell}</button>`:""}
+        <button class="icobtn" title="标记完成" aria-label="完成" onclick="doDone(${w.id})">${ICON.check}</button>
+      </div>`).join("") : `<div class="empty">— 空 —</div>`;
+    html += `</div></section>`;
+  }
+  if(idle.length){
+    html += `<section class="group"><h2>无等待项（需要定方向）<span class="n">${idle.length}</span></h2><div class="rows">`;
+    html += idle.map(p=>`<div class="row idlerow"><button class="code" onclick="openDrawer(${p.id})">${esc(p.code)}</button><span class="what">${esc(p.title)}</span><button class="btn" onclick="dlgAddWait(${p.id})">＋等待项</button></div>`).join("");
+    html += `</div></section>`;
+  }
+  document.getElementById("groups").innerHTML = html;
+
+  // closed
+  const box = document.getElementById("closedBox");
+  box.hidden = !closed.length;
+  if(closed.length){
+    box.querySelector("summary").textContent = `已关闭 (${closed.length})`;
+    document.getElementById("closedRows").innerHTML = closed.map(p=>
+      `<div class="row"><button class="code" onclick="openDrawer(${p.id})">${esc(p.code)}</button><span class="what">${esc(p.title)}</span><span class="who">${esc((p.closed_at||"").slice(0,10))}</span></div>`).join("");
+  }
+
+  const open = document.getElementById("drawer").dataset.pid;
+  if(open && document.getElementById("drawer").classList.contains("show")) fillDrawer(+open);
+}
+
+/* ---------- drawer ---------- */
+function openDrawer(pid){
+  fillDrawer(pid);
+  document.getElementById("drawer").classList.add("show");
+  document.getElementById("overlay").classList.add("show");
+}
+function closeDrawer(){
+  document.getElementById("drawer").classList.remove("show");
+  document.getElementById("overlay").classList.remove("show");
+}
+document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeDrawer(); });
+
+function fillDrawer(pid){
+  const p = S.projects.find(x=>x.id===pid); if(!p) return closeDrawer();
+  const d = document.getElementById("drawer");
+  d.dataset.pid = pid;
+  const waits = p.waits.map(w=>`
+    <div class="dwait ${w.done?"done":""}">
+      <span class="flex">${PARTY[w.party]}${w.who?` @${esc(w.who)}`:""}: ${esc(w.what)}</span>
+      ${w.done?`<span class="age">已完成</span>`:`${ageBadge(w)}
+        <button class="icobtn" title="催促" aria-label="催促" onclick="doNudge(${w.id})">${ICON.bell}</button>
+        <button class="icobtn" title="完成" aria-label="完成" onclick="doDone(${w.id})">${ICON.check}</button>`}
+    </div>`).join("") || `<div class="empty">无</div>`;
+  d.innerHTML = `
+    <button class="icobtn xclose" aria-label="关闭" onclick="closeDrawer()"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    <h2 class="dcode">${esc(p.code)}</h2>
+    <p class="dtitle">${esc(p.title)}</p>
+    <div class="meta">
+      ${p.stage?`<span class="stage">${esc(p.stage)}</span>`:""}
+      ${p.category?`<span>${esc(p.category)}</span>`:""}
+      <span>${p.status==="active"?"进行中":"已关闭"}</span>
+    </div>
+    <div class="dsec"><h3>等待项</h3>${waits}</div>
+    ${p.refs.length?`<div class="dsec refs"><h3>参考</h3>${p.refs.map(r=>{
+      const isUrl = /^https?:\/\//.test(r.target);
+      return isUrl?`<a href="${esc(r.target)}" target="_blank" rel="noopener">${ICON.link} ${esc(r.label)}</a>`
+                  :`<a href="#" onclick="return false" title="${esc(r.target)}">${ICON.link} ${esc(r.label)}: ${esc(r.target)}</a>`;
+    }).join("")}</div>`:""}
+    ${p.notes.length?`<div class="dsec"><h3>笔记</h3>${p.notes.map(n=>`<details class="notebox"><summary>${esc(n.title)}</summary><pre>${esc(n.content)}</pre></details>`).join("")}</div>`:""}
+    <div class="dsec"><h3>时间线</h3><div class="tl"><ul>${p.events.map(e=>`<li><span class="ts">${esc(e.ts)}</span>${esc(e.text)}</li>`).join("")}</ul></div></div>
+    <div class="dactions">
+      <button class="btn" onclick="dlgAddWait(${p.id})">＋等待项</button>
+      <button class="btn" onclick="dlgLog(${p.id})">＋记事</button>
+      <button class="btn" onclick="dlgStage(${p.id})">改阶段</button>
+      ${p.status==="active"
+        ?`<button class="btn" onclick="doClose(${p.id})">关闭项目</button>`
+        :`<button class="btn" onclick="cmd('update',{code:'${esc(p.code)}',status:'active'},'已重新打开')">重新打开</button>`}
+    </div>`;
+}
+
+/* ---------- actions ---------- */
+function waitInfo(id){
+  for(const p of S.projects){ const w = p.waits.find(w=>w.id===id); if(w) return {p,w}; }
+  return null;
+}
+function doDone(id){
+  const note = prompt("完成备注（可空）：","");
+  if(note===null) return;
+  const i = waitInfo(id);
+  cmd("done",{id,note}, i?`已完成 [${i.p.code}] ${i.w.what.slice(0,24)}`:"已完成等待项");
+}
+function doNudge(id){
+  const i = waitInfo(id);
+  cmd("nudge",{id}, i?`已记录催促 [${i.p.code}] @${i.w.who||""}`:"已记录催促");
+}
+function doClose(pid){
+  const p = S.projects.find(x=>x.id===pid);
+  if(confirm(`关闭项目 [${p.code}]？未完成等待项会一并了结。`)) cmd("update",{code:p.code,status:"closed"},`已关闭项目 [${p.code}]`);
+}
+
+/* ---------- dialogs ---------- */
+const dlg = document.getElementById("dlg");
+function showDlg(html, onOk){
+  dlg.innerHTML = html + `<div class="dlgbtns"><button class="btn" onclick="dlg.close()">取消</button><button class="btn primary" id="dlgOk">确定</button></div>`;
+  dlg.showModal();
+  document.getElementById("dlgOk").onclick = async ()=>{ if(await onOk()!==false) dlg.close(); };
+}
+function dlgAddProject(){
+  showDlg(`<h3>新项目</h3>
+    <label for="f_code">代号 *</label><input id="f_code" placeholder="如：火箭真空炉">
+    <label for="f_title">一句话身份</label><input id="f_title" placeholder="客户 / 要什么">
+    <label for="f_cat">类别</label><input id="f_cat" placeholder="如：销售 / 支持" list="catlist">
+    <datalist id="catlist">${[...new Set(S.projects.map(p=>p.category).filter(Boolean))].map(c=>`<option value="${esc(c)}">`).join("")}</datalist>
+    <label for="f_stage">阶段</label><input id="f_stage" placeholder="如：等报价">`,
+  ()=>{
+    const code = document.getElementById("f_code").value.trim();
+    if(!code){ showErr("代号必填"); return false; }
+    return cmd("add",{code, title:f_title.value.trim(), category:f_cat.value.trim(), stage:f_stage.value.trim()}, `已创建项目 [${code}]`);
+  });
+}
+function dlgAddWait(pid){
+  const p = S.projects.find(x=>x.id===pid);
+  showDlg(`<h3>[${esc(p.code)}] 添加等待项</h3>
+    <label for="f_party">球在谁手里 *</label>
+    <select id="f_party">${ORDER.map(k=>`<option value="${k}">${PARTY[k]}</option>`).join("")}</select>
+    <label for="f_who">具体是谁（可空）</label><input id="f_who" placeholder="如：Lucy">
+    <label for="f_what">等什么事 *</label><input id="f_what">
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px"><input type="checkbox" id="f_clear" style="width:auto">同时了结该项目现有等待项</label>`,
+  ()=>{
+    const what = document.getElementById("f_what").value.trim();
+    if(!what){ showErr("内容必填"); return false; }
+    return cmd("wait",{code:p.code, party:f_party.value, what, who:f_who.value.trim(), clear:f_clear.checked}, `已添加等待项 [${p.code}]`);
+  });
+}
+function dlgLog(pid){
+  const p = S.projects.find(x=>x.id===pid);
+  showDlg(`<h3>[${esc(p.code)}] 记事</h3><label for="f_text">发生了什么 *</label><textarea id="f_text" rows="3"></textarea>`,
+  ()=>{
+    const text = document.getElementById("f_text").value.trim();
+    if(!text){ showErr("内容必填"); return false; }
+    return cmd("log",{code:p.code, text}, `已记事 [${p.code}]`);
+  });
+}
+function dlgStage(pid){
+  const p = S.projects.find(x=>x.id===pid);
+  showDlg(`<h3>[${esc(p.code)}] 改阶段</h3><label for="f_stage2">新阶段</label><input id="f_stage2" value="${esc(p.stage)}">`,
+  ()=> cmd("update",{code:p.code, stage:f_stage2.value.trim()}, `已改阶段 [${p.code}]`));
+}
+
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>

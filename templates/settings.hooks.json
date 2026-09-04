@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/tracker_hook.py session-start",
+            "statusMessage": "Loading whose-ball tracker board"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/tracker_hook.py prompt"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/tracker_hook.py stop",
+            "statusMessage": "Checking tracker sync"
+          }
+        ]
+      }
+    ]
+  }
+}

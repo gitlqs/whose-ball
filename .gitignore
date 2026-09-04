@@ -1,0 +1,5 @@
+tracker.db
+tracker.db.undo
+__pycache__/
+*.pyc
+.claude/
