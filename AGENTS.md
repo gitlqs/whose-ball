@@ -34,11 +34,11 @@ rm -rf /tmp/whose-ball
 | tracker 文件 | `tracker.py` `index.html` `tracker.bat` 复制到项目根（或 `--subdir`） |
 | hook 脚本 | `hooks/tracker_hook.py` → `.claude/hooks/tracker_hook.py` |
 | hook 配置 | 写 `.claude/tracker_hooks.json`（tracker 目录、严格模式开关、关键词） |
-| settings.json | 把 SessionStart / UserPromptSubmit / Stop 三个 hook **合并**进 `.claude/settings.json`，不动已有 hook |
+| settings.json | 把 SessionStart / UserPromptSubmit / Stop 三个 hook **合并**进 `.claude/settings.json`，不动已有 hook；顺手把早期版本装下的相对路径命令升级成 `$CLAUDE_PROJECT_DIR` 形式，改动前留 `.bak`。文件在但不是合法 JSON 时直接退出，绝不覆盖 |
 | launch.json | 加一个名为 `tracker` 的 preview 配置（端口 8765） |
 | CLAUDE.md | 追加一段带 `<!-- whose-ball:start/end -->` 标记的"同步规则"段落 |
 | .gitignore | 加 `tracker.db` `tracker.db.undo` |
-| 自检 | 跑 `tracker.py list` 和三个 hook，确认 JSON 输出合法 |
+| 自检 | 跑 `tracker.py list` 和三个 hook，各跑两轮：项目根 + 一个无关目录（模拟 agent `cd` 进子目录后 hook 的 cwd 漂移），确认 JSON 输出合法、session-start 确实吐出看板 |
 
 ### 参数怎么定（不要问用户，自己判断）
 
@@ -51,7 +51,8 @@ rm -rf /tmp/whose-ball
 - `--no-strict`：关闭 Stop 严格检查。默认**开**。如果用户的会话大多是写代码而不是跟进事项，可以关掉，只留提醒。
 - `--skip-claude-md`：项目 CLAUDE.md 里已经有手写的 tracker 段落（没有 `<!-- whose-ball -->` 标记）时用，避免出现两段。
 - 已有 tracker.db 时不传 `--stages` 就不会覆盖 db 里的阶段设置；db 里没设过则写入默认值。
-- 本机只有 `python3` 没有 `python`：装完把 `.claude/settings.json` 里三处 `python .claude/hooks/...` 改成 `python3 ...`。
+- 本机只有 `python3` 没有 `python`：装完把 `.claude/settings.json` 里三处命令开头的 `python` 改成 `python3`。
+- hook shell 是 PowerShell：把三处 `$CLAUDE_PROJECT_DIR` 改成 `$env:CLAUDE_PROJECT_DIR`（PowerShell 把 `$CLAUDE_PROJECT_DIR` 读成未定义变量）。**任何情况下都别把它改回相对路径**，理由见下一节。
 
 ### 装完怎么汇报
 
@@ -59,7 +60,7 @@ rm -rf /tmp/whose-ball
 
 ## 2. Hooks 是怎么钉住行为的
 
-三个 hook 都是 `.claude/hooks/tracker_hook.py` 的子命令，配置在 `.claude/tracker_hooks.json`：
+三个 hook 都是 `.claude/hooks/tracker_hook.py` 的子命令（命令里路径必须绝对，见本节末尾），配置在 `.claude/tracker_hooks.json`：
 
 | Hook | 触发 | 做什么 |
 |---|---|---|
@@ -80,6 +81,20 @@ rm -rf /tmp/whose-ball
 
 CLAUDE.md 里那段"同步规则"是第四道保险：hooks 靠机制，CLAUDE.md 靠说明，两者内容一致。
 
+### hook 命令的路径必须绝对（踩过的坑）
+
+```json
+"command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/tracker_hook.py\" prompt"
+```
+
+相对路径（`python .claude/hooks/tracker_hook.py prompt`）看着更短，但 hook 命令是在 **hook 进程的 cwd** 下解析的，而 agent 只要在会话里 `cd` 进过一次子目录，cwd 就一直留在那个子目录。后果按 hook 分：
+
+- **UserPromptSubmit**：python 找不到脚本 → 退出码 2 → 这个退出码在 UserPromptSubmit 上的语义正好是"拦截这条 prompt"，用户会突然发不出消息，只看到一行 `can't open file`
+- **SessionStart**：同样失败，但没人拦，表现为**静悄悄地不注入看板**，最难发现
+- **PreToolUse**（若项目还有别的守卫脚本）：退出码 2 = 拒绝这次工具调用，正常操作被莫名其妙挡住
+
+`tracker_hook.py` 自己的 `_root()` 也是同样的道理：用 `CLAUDE_PROJECT_DIR` / `__file__` 定位项目根，绝不用 `os.getcwd()`。`install.py` 的自检会在一个无关目录里再跑一遍三个 hook，专门盯这个回归。
+
 ## 3. 装好之后，你（agent）每个回合要做的事
 
 1. 用户提到某个项目 → 先 `python tracker.py show 代号`（唯一子串即可）看当前等待项和时间线。
@@ -99,12 +114,12 @@ CLAUDE.md 里那段"同步规则"是第四道保险：hooks 靠机制，CLAUDE.m
 
 1. 把 `tracker.py` `index.html` `tracker.bat` 放进项目根（或子目录）。
 2. `hooks/tracker_hook.py` 放到 `.claude/hooks/`。
-3. 把 `templates/settings.hooks.json` 的内容合并进 `.claude/settings.json`（同名事件数组 append，别覆盖）。
+3. 把 `templates/settings.hooks.json` 的内容合并进 `.claude/settings.json`（同名事件数组 append，别覆盖）。命令里的 `$CLAUDE_PROJECT_DIR` 原样保留，别图短改成相对路径。
 4. `templates/launch.json` 的 `tracker` 配置合并进 `.claude/launch.json`，`{TRACKER_PY}` 换成实际路径。
 5. `templates/CLAUDE.section.md` 追加到 `CLAUDE.md`，替换 `{CLI}` `{TRACKER_DIR}` `{STAGES}` `{CATEGORIES}`。
 6. 写 `.claude/tracker_hooks.json`：`{"tracker_dir": ".", "strict": true}`。
 7. `.gitignore` 加 `tracker.db` `tracker.db.undo`。
-8. 验证：`echo '{"session_id":"t","prompt":"客户回了"}' | python .claude/hooks/tracker_hook.py prompt` 应输出一段 JSON。
+8. 验证：`echo '{"session_id":"t","prompt":"客户回了"}' | python .claude/hooks/tracker_hook.py prompt` 应输出一段 JSON。再随便 `cd` 到一个无关目录、用脚本的绝对路径重跑一次 `session-start`，应该照样吐出看板——这才说明没踩 cwd 漂移。
 
 ## 5. CLI 速查
 

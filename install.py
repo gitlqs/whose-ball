@@ -19,9 +19,11 @@ import argparse
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MARK_START, MARK_END = "<!-- whose-ball:start -->", "<!-- whose-ball:end -->"
@@ -33,19 +35,40 @@ def log(msg):
     print("  " + msg)
 
 
-def read_json(path, default):
+def read_json(path, default, strict=False):
+    """strict=True 用于"读出来还要写回去"的文件：文件在但解析不了时宁可退出，
+    也不能拿 default 覆盖——否则用户手写的其它 hook / 配置会被静默抹掉。"""
+    if not os.path.exists(path):
+        return default
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        if strict:
+            sys.exit(f"\n{path}\n存在但不是合法 JSON（{e}）。"
+                     "install.py 不会覆盖它——请先修好这个文件再重跑。")
         return default
 
 
-def write_json(path, obj):
+def write_json(path, obj, backup=False):
+    """内容没变就不动文件；要变且原文件存在时，先留一份 .bak。返回是否真的写了。"""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    new = json.dumps(obj, ensure_ascii=False, indent=2) + "\n"
+    old = None
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                old = f.read()
+        except OSError:
+            old = None
+    if old == new:
+        return False
+    if backup and old is not None:
+        shutil.copyfile(path, path + ".bak")
+        log(f"备份: {path}.bak")
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+        f.write(new)
+    return True
 
 
 def copy_file(src, dst, force):
@@ -60,10 +83,48 @@ def copy_file(src, dst, force):
     log(f"写入: {dst}")
 
 
+HOOK_PATH_TOKEN = re.compile(r'"?([^\s"]*tracker_hook\.py)"?')
+
+
+def absolutize_command(cmd):
+    """把相对路径的 hook 命令改写成 $CLAUDE_PROJECT_DIR 形式，返回 (命令, 是否改过)。
+
+    相对路径是相对 hook 进程的 cwd 解析的，而 agent 在会话里 `cd` 进子目录之后 cwd 就
+    一直留在那儿：python 找不到脚本、以退出码 2 结束，而 UserPromptSubmit 的退出码 2
+    正好是"拦截这条 prompt"，用户会莫名其妙地发不出消息。
+    """
+    m = HOOK_PATH_TOKEN.search(cmd)
+    if not m:
+        return cmd, False
+    path = m.group(1)
+    if path.startswith(("$", "%", "/", "~")) or re.match(r"^[A-Za-z]:", path):
+        return cmd, False  # 已经是绝对路径或已经用了变量
+    rel = path.replace("\\", "/")
+    rel = rel[2:] if rel.startswith("./") else rel
+    return cmd[:m.start()] + '"$CLAUDE_PROJECT_DIR/' + rel + '"' + cmd[m.end():], True
+
+
+def migrate_legacy_hooks(hooks):
+    """升级早期版本装下的相对路径 hook 命令，返回改了几条。"""
+    fixed = 0
+    for groups in hooks.values():
+        for group in groups if isinstance(groups, list) else []:
+            for h in (group or {}).get("hooks", []) or []:
+                cmd = h.get("command")
+                if not isinstance(cmd, str):
+                    continue
+                new, changed = absolutize_command(cmd)
+                if changed:
+                    h["command"] = new
+                    fixed += 1
+    return fixed
+
+
 def merge_hooks(settings_path):
-    settings = read_json(settings_path, {})
-    tmpl = read_json(os.path.join(HERE, "templates", "settings.hooks.json"), {})["hooks"]
+    settings = read_json(settings_path, {}, strict=True)
+    tmpl = read_json(os.path.join(HERE, "templates", "settings.hooks.json"), {}, strict=True)["hooks"]
     hooks = settings.setdefault("hooks", {})
+    fixed = migrate_legacy_hooks(hooks)
     added = []
     for event, groups in tmpl.items():
         existing = hooks.setdefault(event, [])
@@ -72,21 +133,24 @@ def merge_hooks(settings_path):
             continue
         existing.extend(groups)
         added.append(event)
-    write_json(settings_path, settings)
+    write_json(settings_path, settings, backup=True)
     log(f"settings.json hooks: " + (f"新增 {', '.join(added)}" if added else "已存在，未改动"))
+    if fixed:
+        log(f"settings.json hooks: 升级 {fixed} 条旧的相对路径命令 → $CLAUDE_PROJECT_DIR"
+            "（相对路径在 agent cd 进子目录后会失效）")
 
 
 def merge_launch(launch_path, tracker_py_rel):
-    launch = read_json(launch_path, {"version": "0.0.1", "configurations": []})
+    launch = read_json(launch_path, {"version": "0.0.1", "configurations": []}, strict=True)
     confs = launch.setdefault("configurations", [])
     if any(c.get("name") == "tracker" for c in confs):
         log("launch.json: 'tracker' 配置已存在，未改动")
         return
-    tmpl = read_json(os.path.join(HERE, "templates", "launch.json"), {})
+    tmpl = read_json(os.path.join(HERE, "templates", "launch.json"), {}, strict=True)
     conf = tmpl["configurations"][0]
     conf["runtimeArgs"] = [a.replace("{TRACKER_PY}", tracker_py_rel) for a in conf["runtimeArgs"]]
     confs.append(conf)
-    write_json(launch_path, launch)
+    write_json(launch_path, launch, backup=True)
     log("launch.json: 新增 'tracker' 配置")
 
 
@@ -161,17 +225,29 @@ def selfcheck(target, tracker_py_rel, hook_rel):
     log(f"tracker.py list → rc={rc}" + ("" if rc == 0 else f" stderr={err.strip()}"))
     ok &= rc == 0
     sample = json.dumps({"session_id": "selfcheck", "prompt": "客户回了邮件，报价已确认，等 PO", "stop_hook_active": False})
-    for sub in ("session-start", "prompt", "stop"):
-        rc, out, err = run([sys.executable, hook_rel, sub], target, sample)
-        valid = True
-        if out.strip():
-            try:
-                json.loads(out)
-            except ValueError:
-                valid = False
-        status = "ok" if (rc == 0 and valid) else f"FAIL rc={rc} valid_json={valid} stderr={err.strip()[:200]}"
-        log(f"hook {sub:<13} → {status}")
-        ok &= rc == 0 and valid
+    hook_abs = os.path.join(target, hook_rel)
+    # 第二轮在一个无关目录里跑：模拟 agent 会话里 `cd` 进子目录之后 hook 的 cwd 漂移，
+    # hook 必须照常工作（不能靠 getcwd() 找 tracker.py/tracker.db）。
+    drift = tempfile.mkdtemp(prefix="whose-ball-check-")
+    try:
+        for sub in ("session-start", "prompt", "stop"):
+            for label, cwd in (("项目根", target), ("cwd 漂移", drift)):
+                rc, out, err = run([sys.executable, hook_abs, sub], cwd, sample)
+                why = ""
+                if rc != 0:
+                    why = f"rc={rc} stderr={err.strip()[:200]}"
+                elif out.strip():
+                    try:
+                        json.loads(out)
+                    except ValueError:
+                        why = "输出不是合法 JSON"
+                elif sub == "session-start":
+                    # 静默失败：找不到 tracker.py 时 session-start 什么都不输出
+                    why = "没有注入看板，说明没找到 tracker.py"
+                log(f"hook {sub:<13} [{label:<8}] → " + ("ok" if not why else f"FAIL {why}"))
+                ok &= not why
+    finally:
+        shutil.rmtree(drift, ignore_errors=True)
     return ok
 
 
@@ -212,7 +288,7 @@ def main():
 
     print("[3/7] hook 配置")
     cfg_path = os.path.join(target, ".claude", "tracker_hooks.json")
-    cfg = read_json(cfg_path, {})
+    cfg = read_json(cfg_path, {}, strict=True)
     cfg["tracker_dir"] = subdir
     cfg["strict"] = not a.no_strict
     write_json(cfg_path, cfg)
@@ -242,10 +318,12 @@ def main():
     ok = selfcheck(target, tracker_py_rel, hook_rel)
     print("\n完成。" if ok else "\n完成，但自检有失败项，见上。")
     print("提醒：hooks 在 Claude Code 里要重开会话（或 /hooks 重载）才生效；"
-          "hook 命令用的是 `python`，若本机只有 `python3`，请把 .claude/settings.json 里三处 `python` 改成 `python3`。")
+          "hook 命令用的是 `python`，若本机只有 `python3`，请把 .claude/settings.json 里三处 `python` 改成 `python3`；"
+          "hook shell 若是 PowerShell，把三处 `$CLAUDE_PROJECT_DIR` 改成 `$env:CLAUDE_PROJECT_DIR`。")
     sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
     main()

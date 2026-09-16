@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/tracker_hook.py session-start",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/tracker_hook.py\" session-start",
             "statusMessage": "Loading whose-ball tracker board"
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/tracker_hook.py prompt"
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/tracker_hook.py\" prompt"
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/tracker_hook.py stop",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/tracker_hook.py\" stop",
             "statusMessage": "Checking tracker sync"
           }
         ]

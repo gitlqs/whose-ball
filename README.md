@@ -81,6 +81,14 @@ serve [--port 8765]                           web 看板
 
 配置在 `.claude/tracker_hooks.json`（`strict`、`min_chars`、`keywords`、`tracker_dir`）。再加上 CLAUDE.md 里那段同步规则，机制 + 说明双保险。
 
+三条命令都写成绝对路径：
+
+```
+python "$CLAUDE_PROJECT_DIR/.claude/hooks/tracker_hook.py" prompt
+```
+
+**别改成相对路径。** hook 命令是在 hook 进程的 cwd 下解析的，而 agent 只要在会话里 `cd` 进过一次子目录，cwd 就一直留在那儿：python 找不到脚本、以退出码 2 结束，而 UserPromptSubmit 的退出码 2 恰好是"拦截这条 prompt"——用户会突然发不出消息，SessionStart 则是静悄悄地不注入看板。hook shell 是 PowerShell 时把 `$CLAUDE_PROJECT_DIR` 换成 `$env:CLAUDE_PROJECT_DIR`。
+
 ## 文件
 
 ```

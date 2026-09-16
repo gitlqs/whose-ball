@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """whose-ball tracker 的 Claude Code hooks（零依赖）。
 
-在 .claude/settings.json 里这样挂（hook 的 cwd 就是项目根目录）：
+在 .claude/settings.json 里这样挂（路径写绝对，别写相对——理由见 _root 的注释）：
 
-  SessionStart      -> python .claude/hooks/tracker_hook.py session-start
-  UserPromptSubmit  -> python .claude/hooks/tracker_hook.py prompt
-  Stop              -> python .claude/hooks/tracker_hook.py stop
+  SessionStart      -> python "$CLAUDE_PROJECT_DIR/.claude/hooks/tracker_hook.py" session-start
+  UserPromptSubmit  -> python "$CLAUDE_PROJECT_DIR/.claude/hooks/tracker_hook.py" prompt
+  Stop              -> python "$CLAUDE_PROJECT_DIR/.claude/hooks/tracker_hook.py" stop
+
+（hook shell 是 PowerShell 时把 $CLAUDE_PROJECT_DIR 换成 $env:CLAUDE_PROJECT_DIR。）
 
 三个子命令分别做：
   session-start  把 `tracker.py list` 的看板注入会话上下文，agent 一开场就知道球在谁手里
@@ -24,7 +26,20 @@ import sys
 import tempfile
 import time
 
-ROOT = os.path.normcase(os.path.realpath(os.getcwd()))
+
+def _root():
+    """项目根目录。绝不能用 getcwd()：agent 在会话里 `cd` 进过子目录之后，hook 进程的 cwd
+    就一直留在那个子目录，getcwd() 指到错的地方——SessionStart 静悄悄地找不到 tracker.py
+    （看板不注入），Stop 也查不到 tracker.db。
+    优先用 Claude Code 注入的 CLAUDE_PROJECT_DIR，退回到本脚本位置（<root>/.claude/hooks/）。"""
+    env = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env and os.path.isdir(env):
+        return os.path.normcase(os.path.realpath(env))
+    here = os.path.dirname(os.path.realpath(__file__))  # <root>/.claude/hooks
+    return os.path.normcase(os.path.realpath(os.path.join(here, "..", "..")))
+
+
+ROOT = _root()
 CFG_PATH = os.path.join(ROOT, ".claude", "tracker_hooks.json")
 
 DEFAULTS = {
