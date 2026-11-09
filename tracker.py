@@ -13,7 +13,19 @@
   python tracker.py ref 代号 "标签" "URL或路径"
   python tracker.py update 代号 [-t ...] [-s 阶段] [--status active|closed]
   python tracker.py close 代号 ["原因"]
-  python tracker.py list [--all] / show 代号 / serve [--port 8765]
+  python tracker.py list [--all] [--dept D] / show 代号 / serve [--port 8765]
+
+部门（可选，代码从配置读，不写死）:
+  python tracker.py depts [--set "CODE=名称;CODE=名称"]   add/update 用 -d/--dept
+决策（给人拍板，显示在 /boss）:
+  python tracker.py ask 代号 "问题" --options "A|B|C" | --text | --ack
+  python tracker.py decisions [--pending | --answered-unconsumed]
+  python tracker.py answer ID "答复"      python tracker.py consume ID
+落笔前审查记录:
+  python tracker.py review 代号 --action email|sf_create|sf_update --verdict pass|fail
+                           [--plan-file 文件 | --plan 文字] [--findings ...] [--reviewer ...]
+  python tracker.py review-ok 代号 --action X [--within 30]   (退出码 0=有效通过, 1=没有)
+看板: serve 后 / 是项目看板, /boss 是决策看板
 """
 import argparse
 import json
@@ -66,7 +78,34 @@ CREATE TABLE IF NOT EXISTS refs(
   label TEXT, target TEXT, created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS decisions(
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('choice','text','ack')),
+  question TEXT NOT NULL,
+  options TEXT DEFAULT '[]',
+  answer TEXT,
+  answered_at TEXT,
+  consumed_at TEXT,
+  created_by TEXT DEFAULT '',
+  created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS reviews(
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  action TEXT NOT NULL CHECK(action IN ('email','sf_create','sf_update')),
+  plan TEXT DEFAULT '',
+  verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail')),
+  findings TEXT DEFAULT '',
+  reviewer TEXT DEFAULT '',
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_lookup ON reviews(project_id, action, created_at);
 """
+DECISION_KINDS = ("choice", "text", "ack")
+REVIEW_ACTIONS = ("email", "sf_create", "sf_update")
+# 旧库补列：(表, 列, 定义)
+MIGRATIONS = [("projects", "dept", "TEXT DEFAULT ''")]
 
 
 def db():
@@ -74,6 +113,11 @@ def db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    for table, col, ddl in MIGRATIONS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            conn.commit()
     return conn
 
 
@@ -88,6 +132,32 @@ def today():
 def get_setting(conn, key, default):
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
+
+
+def nowsec():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_depts(conn):
+    """部门表从 settings.departments 读：JSON [{"code":..,"name":..}]。没配置则为空(不校验)。"""
+    try:
+        v = json.loads(get_setting(conn, "departments", "[]"))
+        return [d for d in v if isinstance(d, dict) and d.get("code")]
+    except ValueError:
+        return []
+
+
+def norm_dept(conn, dept):
+    """校验并规范化部门代码；None=不改，''=清空。配置了部门表时只接受表内代码(不分大小写)。"""
+    if dept is None or dept == "":
+        return dept
+    depts = get_depts(conn)
+    if not depts:
+        return dept
+    for d in depts:
+        if d["code"].lower() == dept.lower():
+            return d["code"]
+    sys.exit(f"未知部门 '{dept}'，可选: " + ", ".join(d["code"] for d in depts))
 
 
 def find_project(conn, code, required=True):
@@ -116,12 +186,13 @@ def add_event(conn, pid, text, ts=None):
 
 # ---------- 核心操作（CLI 与 HTTP 共用） ----------
 
-def op_add(conn, code, title="", category="", stage="", quiet=False):
+def op_add(conn, code, title="", category="", stage="", quiet=False, dept=""):
     if conn.execute("SELECT 1 FROM projects WHERE code=?", (code,)).fetchone():
         sys.exit(f"项目已存在: {code}")
+    dept = norm_dept(conn, dept or "")
     cur = conn.execute(
-        "INSERT INTO projects(code,title,category,stage,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-        (code, title, category, stage, now(), now()),
+        "INSERT INTO projects(code,title,category,stage,dept,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+        (code, title, category, stage, dept, now(), now()),
     )
     add_event(conn, cur.lastrowid, "项目创建")
     conn.commit()
@@ -130,10 +201,11 @@ def op_add(conn, code, title="", category="", stage="", quiet=False):
     return cur.lastrowid
 
 
-def op_update(conn, code, title=None, category=None, stage=None, status=None):
+def op_update(conn, code, title=None, category=None, stage=None, status=None, dept=None):
     p = find_project(conn, code)
     changes = []
-    for field, val in (("title", title), ("category", category)):
+    dept = norm_dept(conn, dept)
+    for field, val in (("title", title), ("category", category), ("dept", dept)):
         if val is not None and val != p[field]:
             conn.execute(f"UPDATE projects SET {field}=? WHERE id=?", (val, p["id"]))
             changes.append(f"{field}: {val}")
@@ -233,6 +305,94 @@ def op_ref(conn, code, label, target):
     print(f"[{p['code']}] 参考{label}: {target}")
 
 
+def op_ask(conn, code, question, kind, options=None, created_by=""):
+    if kind not in DECISION_KINDS:
+        sys.exit(f"kind 必须是 {'/'.join(DECISION_KINDS)} 之一")
+    opts = [o.strip() for o in (options or []) if o.strip()]
+    if kind == "choice" and len(opts) < 2:
+        sys.exit('choice 类决策至少要两个选项 (--options "A|B")')
+    if kind != "choice":
+        opts = []
+    p = find_project(conn, code)
+    cur = conn.execute(
+        "INSERT INTO decisions(project_id,kind,question,options,created_by,created_at) VALUES(?,?,?,?,?,?)",
+        (p["id"], kind, question, json.dumps(opts, ensure_ascii=False), created_by, now()),
+    )
+    add_event(conn, p["id"], f"提请决策#{cur.lastrowid}: {question}"
+              + (f" [{' / '.join(opts)}]" if opts else ""))
+    conn.commit()
+    print(f"[{p['code']}] decision#{cur.lastrowid} ({kind}) {question}")
+    return cur.lastrowid
+
+
+def op_answer(conn, did, answer):
+    d = conn.execute("SELECT * FROM decisions WHERE id=?", (did,)).fetchone()
+    if not d:
+        sys.exit(f"找不到决策 #{did}")
+    if d["consumed_at"]:
+        sys.exit(f"决策 #{did} 已被转交处理，不能再改")
+    answer = (answer or "").strip()
+    if d["kind"] == "ack":
+        answer = answer or "已知悉"
+    if not answer:
+        sys.exit("答复不能为空")
+    opts = json.loads(d["options"] or "[]")
+    if d["kind"] == "choice" and answer not in opts:
+        sys.exit(f"'{answer}' 不在选项里: " + " / ".join(opts))
+    conn.execute("UPDATE decisions SET answer=?, answered_at=? WHERE id=?", (answer, now(), did))
+    add_event(conn, d["project_id"], f"决策#{did} 答复: {answer}（问: {d['question']}）")
+    conn.commit()
+    print(f"decision#{did} 已答复: {answer}")
+
+
+def op_consume(conn, did):
+    d = conn.execute("SELECT * FROM decisions WHERE id=?", (did,)).fetchone()
+    if not d:
+        sys.exit(f"找不到决策 #{did}")
+    if not d["answered_at"]:
+        sys.exit(f"决策 #{did} 还没答复")
+    if d["consumed_at"]:
+        sys.exit(f"决策 #{did} 已于 {d['consumed_at']} 转交过")
+    conn.execute("UPDATE decisions SET consumed_at=? WHERE id=?", (now(), did))
+    add_event(conn, d["project_id"], f"决策#{did} 已转交处理: {d['answer']}")
+    conn.commit()
+    print(f"decision#{did} 已标记转交 ({d['answer']})")
+
+
+def op_review(conn, code, action, verdict, plan="", findings="", reviewer=""):
+    if action not in REVIEW_ACTIONS:
+        sys.exit(f"action 必须是 {'/'.join(REVIEW_ACTIONS)} 之一")
+    if verdict not in ("pass", "fail"):
+        sys.exit("verdict 必须是 pass/fail")
+    p = find_project(conn, code)
+    cur = conn.execute(
+        "INSERT INTO reviews(project_id,action,plan,verdict,findings,reviewer,created_at) VALUES(?,?,?,?,?,?,?)",
+        (p["id"], action, plan, verdict, findings, reviewer, nowsec()),
+    )
+    add_event(conn, p["id"], f"落笔审查#{cur.lastrowid} {action}: {verdict.upper()}"
+              + (f" — {findings[:120]}" if findings else ""))
+    conn.commit()
+    print(f"[{p['code']}] review#{cur.lastrowid} {action} {verdict}")
+    return cur.lastrowid
+
+
+def review_ok(conn, code, action, within_min=30):
+    """该项目该动作最近一条审查记录是 pass 且在 within_min 分钟内 → (True, 说明)。"""
+    p = find_project(conn, code)
+    r = conn.execute(
+        "SELECT * FROM reviews WHERE project_id=? AND action=? ORDER BY created_at DESC, id DESC LIMIT 1",
+        (p["id"], action),
+    ).fetchone()
+    if not r:
+        return False, f"[{p['code']}] 没有 {action} 审查记录"
+    age = (datetime.now() - datetime.fromisoformat(r["created_at"])).total_seconds() / 60
+    if r["verdict"] != "pass":
+        return False, f"[{p['code']}] 最近一条 {action} 审查 review#{r['id']} 是 FAIL ({r['created_at']})"
+    if age > within_min:
+        return False, f"[{p['code']}] review#{r['id']} 通过于 {r['created_at']}，已过 {age:.0f} 分钟 > {within_min}"
+    return True, f"[{p['code']}] review#{r['id']} {action} PASS，{age:.0f} 分钟前 (≤{within_min})"
+
+
 # ---------- 展示 ----------
 
 def wait_age(w, ref_day=None):
@@ -247,11 +407,22 @@ def wait_age(w, ref_day=None):
 
 def cmd_list(args):
     conn = db()
-    where = "" if args.all else "WHERE p.status='active'"
-    rows = conn.execute(f"SELECT * FROM projects p {where} ORDER BY updated_at DESC").fetchall()
+    conds, params = [], []
+    if not args.all:
+        conds.append("p.status='active'")
+    if getattr(args, "dept", None) is not None:
+        if args.dept in ("-", "none", ""):
+            conds.append("COALESCE(p.dept,'')=''")
+        else:
+            conds.append("p.dept=?")
+            params.append(norm_dept(conn, args.dept))
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    rows = conn.execute(f"SELECT * FROM projects p {where} ORDER BY updated_at DESC", params).fetchall()
     waits = {}
+    shown = {p["id"] for p in rows}
     for w in conn.execute("SELECT * FROM waits WHERE done=0"):
-        waits.setdefault(w["project_id"], []).append(w)
+        if w["project_id"] in shown:
+            waits.setdefault(w["project_id"], []).append(w)
     stale = int(get_setting(conn, "stale_days", "5"))
     groups = {k: [] for k in PARTIES}
     idle = []
@@ -283,13 +454,17 @@ def cmd_show(args):
     conn = db()
     p = find_project(conn, args.code)
     print(f"[{p['code']}] {p['title']}")
-    print(f"  类别: {p['category'] or '—'}  阶段: {p['stage'] or '—'}  状态: {p['status']}")
+    print(f"  部门: {p['dept'] or '—'}  类别: {p['category'] or '—'}  阶段: {p['stage'] or '—'}  状态: {p['status']}")
     for w in conn.execute(
         "SELECT * FROM waits WHERE project_id=? AND done=0 ORDER BY id", (p["id"],)
     ):
         who = f" @{w['who']}" if w["who"] else ""
         nudge = f", {w['nudged_at']}催过" if w["nudged_at"] else ""
         print(f"  wait#{w['id']} {PARTY_CN[w['party']]}{who}: {w['what']} (自{w['since']}{nudge}, {wait_age(w)}天)")
+    for d in conn.execute(
+        "SELECT * FROM decisions WHERE project_id=? AND consumed_at IS NULL ORDER BY id", (p["id"],)
+    ):
+        print("  " + fmt_decision(d, p["code"]))
     for r in conn.execute("SELECT * FROM refs WHERE project_id=? ORDER BY id", (p["id"],)):
         print(f"  ref: {r['label']} → {r['target']}")
     for n in conn.execute("SELECT title FROM notes WHERE project_id=? ORDER BY id", (p["id"],)):
@@ -300,6 +475,110 @@ def cmd_show(args):
         (p["id"], args.n),
     ):
         print(f"  {e['ts']}  {e['text']}")
+
+
+def fmt_decision(d, code):
+    opts = json.loads(d["options"] or "[]")
+    s = f"decision#{d['id']} [{code}] ({d['kind']}) {d['question']}"
+    if opts:
+        s += "  选项: " + " / ".join(opts)
+    if d["answered_at"]:
+        s += f"  → {d['answer']} ({d['answered_at']})"
+        s += f" [已转交 {d['consumed_at']}]" if d["consumed_at"] else " [待转交]"
+    else:
+        s += "  [待答]"
+    return s
+
+
+def cmd_decisions(args):
+    conn = db()
+    q = "SELECT d.*, p.code FROM decisions d JOIN projects p ON p.id=d.project_id"
+    if args.pending:
+        q += " WHERE d.answered_at IS NULL"
+    elif args.answered_unconsumed:
+        q += " WHERE d.answered_at IS NOT NULL AND d.consumed_at IS NULL"
+    rows = conn.execute(q + " ORDER BY d.id").fetchall()
+    for d in rows:
+        print(fmt_decision(d, d["code"]))
+    if not rows:
+        print("（无）")
+
+
+def cmd_depts(args):
+    conn = db()
+    if args.set is not None:
+        depts = []
+        for part in args.set.split(";"):
+            if not part.strip():
+                continue
+            code, _, name = part.partition("=")
+            depts.append({"code": code.strip(), "name": name.strip() or code.strip()})
+        conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('departments',?)",
+                     (json.dumps(depts, ensure_ascii=False),))
+        conn.commit()
+    depts = get_depts(conn)
+    if not depts:
+        print('未配置部门（dept 字段不做校验）。配置: tracker.py depts --set "CODE=名称;CODE=名称"')
+        return
+    counts = {}
+    for r in conn.execute("SELECT COALESCE(dept,'') d, COUNT(*) n FROM projects WHERE status='active' GROUP BY 1"):
+        counts[r["d"]] = r["n"]
+    for d in depts:
+        print(f"  {d['code']:<10} {d['name']}  (进行中 {counts.get(d['code'], 0)})")
+    print(f"  {'(未分)':<10} 进行中 {counts.get('', 0)}")
+
+
+def boss_state(conn):
+    """/boss 页面数据：部门统计 + 待审草稿 + 待决定 + 待意见 + 其他轮到我。"""
+    pat = [x for x in get_setting(conn, "draft_review_pattern", "审核发出").split("|") if x]
+    depts = get_depts(conn)
+    known = {d["code"] for d in depts}
+    rows = conn.execute(
+        "SELECT w.*, p.code, p.title, p.dept FROM waits w JOIN projects p ON p.id=w.project_id "
+        "WHERE w.done=0 AND p.status='active' ORDER BY w.since, w.id").fetchall()
+    stats = {d["code"]: {"code": d["code"], "name": d["name"], "me": 0, "internal": 0, "external": 0}
+             for d in depts}
+    stats_other = {"code": "", "name": "未分部门", "me": 0, "internal": 0, "external": 0}
+    drafts, other_me = [], []
+    for w in rows:
+        bucket = stats[w["dept"]] if w["dept"] in known else stats_other
+        key = {"me": "me", "internal": "internal"}.get(w["party"], "external")
+        bucket[key] += 1
+        if w["party"] != "me":
+            continue
+        item = {"id": w["id"], "code": w["code"], "title": w["title"], "dept": w["dept"] or "",
+                "who": w["who"], "what": w["what"], "since": w["since"], "age": wait_age(w)}
+        (drafts if any(k in w["what"] for k in pat) else other_me).append(item)
+    stat_list = list(stats.values())
+    if any(stats_other[k] for k in ("me", "internal", "external")) or not depts:
+        stat_list.append(stats_other)
+    decs = []
+    for d in conn.execute(
+            "SELECT d.*, p.code, p.title, p.dept FROM decisions d JOIN projects p ON p.id=d.project_id "
+            "WHERE d.consumed_at IS NULL AND p.status='active' ORDER BY d.id"):
+        x = dict(d)
+        x["options"] = json.loads(d["options"] or "[]")
+        decs.append(x)
+    return {
+        "now": now(), "stale_days": int(get_setting(conn, "stale_days", "5")),
+        "owner": get_setting(conn, "owner_name", "我"),
+        "depts": depts, "stats": stat_list, "drafts": drafts, "other_me": other_me,
+        "choices": [d for d in decs if not d["answered_at"] and d["kind"] in ("choice", "ack")],
+        "texts": [d for d in decs if not d["answered_at"] and d["kind"] == "text"],
+        "answered": [d for d in decs if d["answered_at"]],
+    }
+
+
+def op_sent(conn, wait_id):
+    """/boss「已发」：了结等待项并记一笔时间线。"""
+    w = conn.execute("SELECT * FROM waits WHERE id=?", (wait_id,)).fetchone()
+    if not w:
+        sys.exit(f"找不到等待项 #{wait_id}")
+    if w["done"]:
+        sys.exit(f"wait#{wait_id} 已经完成过了")
+    op_done(conn, wait_id, "已发")
+    add_event(conn, w["project_id"], f"在 /boss 标记已发出: {w['what']}")
+    conn.commit()
 
 
 # ---------- HTTP ----------
@@ -328,6 +607,7 @@ def cmd_serve(args):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     index_path = os.path.join(BASE, "index.html")
+    boss_path = os.path.join(BASE, "boss.html")
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, body, ctype="application/json; charset=utf-8"):
@@ -342,6 +622,15 @@ def cmd_serve(args):
             if self.path in ("/", "/index.html"):
                 with open(index_path, "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
+            elif self.path.split("?")[0] in ("/boss", "/boss.html"):
+                with open(boss_path, "rb") as f:
+                    self._send(200, f.read(), "text/html; charset=utf-8")
+            elif self.path.split("?")[0] == "/api/boss":
+                conn = db()
+                try:
+                    self._send(200, boss_state(conn))
+                finally:
+                    conn.close()
             elif self.path == "/api/state":
                 conn = db()
                 try:
@@ -374,9 +663,13 @@ def cmd_serve(args):
                 try:
                     dispatch = {
                         "add": lambda: op_add(conn, a["code"], a.get("title", ""),
-                                              a.get("category", ""), a.get("stage", ""), quiet=True),
+                                              a.get("category", ""), a.get("stage", ""), quiet=True,
+                                              dept=a.get("dept", "")),
                         "update": lambda: op_update(conn, a["code"], a.get("title"),
-                                                    a.get("category"), a.get("stage"), a.get("status")),
+                                                    a.get("category"), a.get("stage"), a.get("status"),
+                                                    a.get("dept")),
+                        "sent": lambda: op_sent(conn, int(a["id"])),
+                        "answer": lambda: op_answer(conn, int(a["id"]), a.get("answer", "")),
                         "wait": lambda: op_wait(conn, a["code"], a["party"], a["what"], a.get("who", ""),
                                                 a.get("since"), a.get("clear", False), quiet=True),
                         "done": lambda: op_done(conn, a["id"], a.get("note", "")),
@@ -389,7 +682,10 @@ def cmd_serve(args):
                         self._send(400, {"error": f"unknown action {action}"})
                         return
                     dispatch[action]()
-                    self._send(200, full_state(conn))
+                    if req.get("view") == "boss":
+                        self._send(200, boss_state(conn))
+                    else:
+                        self._send(200, full_state(conn))
                 finally:
                     conn.close()
             except SystemExit as e:  # op_* 用 sys.exit 报业务错误
@@ -417,12 +713,14 @@ def main():
     s = sub.add_parser("add", help="新建项目")
     s.add_argument("code"); s.add_argument("-t", "--title", default="")
     s.add_argument("-c", "--category", default=""); s.add_argument("-s", "--stage", default="")
-    s.set_defaults(f=lambda a: op_add(db(), a.code, a.title, a.category, a.stage))
+    s.add_argument("-d", "--dept", default="", help="部门代码(见 depts)")
+    s.set_defaults(f=lambda a: op_add(db(), a.code, a.title, a.category, a.stage, dept=a.dept))
 
     s = sub.add_parser("update", help="更新项目字段")
     s.add_argument("code"); s.add_argument("-t", "--title"); s.add_argument("-c", "--category")
     s.add_argument("-s", "--stage"); s.add_argument("--status", choices=["active", "closed"])
-    s.set_defaults(f=lambda a: op_update(db(), a.code, a.title, a.category, a.stage, a.status))
+    s.add_argument("-d", "--dept", help="部门代码；空串清空")
+    s.set_defaults(f=lambda a: op_update(db(), a.code, a.title, a.category, a.stage, a.status, a.dept))
 
     s = sub.add_parser("close", help="关闭项目")
     s.add_argument("code"); s.add_argument("reason", nargs="?", default="")
@@ -467,7 +765,57 @@ def main():
 
     s = sub.add_parser("list", help="按等待方分组列出")
     s.add_argument("--all", action="store_true", help="含已关闭项目")
+    s.add_argument("--dept", help="只看某部门；'-' 看未分部门")
     s.set_defaults(f=cmd_list)
+
+    s = sub.add_parser("depts", help="列出/设置部门表")
+    s.add_argument("--set", help='"CODE=名称;CODE=名称"（整表替换）')
+    s.set_defaults(f=cmd_depts)
+
+    s = sub.add_parser("ask", help="提请决策(显示在 /boss)")
+    s.add_argument("code"); s.add_argument("question")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--options", help='选项 "A|B|C"')
+    g.add_argument("--text", action="store_true", help="要文字意见")
+    g.add_argument("--ack", action="store_true", help="只需知悉")
+    s.add_argument("--by", default="", help="提问者(部门/session)")
+    def _ask(a):
+        kind = "choice" if a.options else ("text" if a.text else "ack")
+        op_ask(db(), a.code, a.question, kind, (a.options or "").split("|"), a.by)
+    s.set_defaults(f=_ask)
+
+    s = sub.add_parser("decisions", help="列出决策")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--pending", action="store_true", help="未答")
+    g.add_argument("--answered-unconsumed", action="store_true", help="已答未转交")
+    s.set_defaults(f=cmd_decisions)
+
+    s = sub.add_parser("answer", help="答复决策(等同 /boss 上点按钮)")
+    s.add_argument("id", type=int); s.add_argument("answer", nargs="?", default="")
+    s.set_defaults(f=lambda a: op_answer(db(), a.id, a.answer))
+
+    s = sub.add_parser("consume", help="标记决策答复已转交处理")
+    s.add_argument("id", type=int)
+    s.set_defaults(f=lambda a: op_consume(db(), a.id))
+
+    s = sub.add_parser("review", help="记录落笔前审查结果")
+    s.add_argument("code"); s.add_argument("--action", required=True, choices=REVIEW_ACTIONS)
+    s.add_argument("--verdict", required=True, choices=["pass", "fail"])
+    s.add_argument("--plan-file"); s.add_argument("--plan", default="")
+    s.add_argument("--findings", default=""); s.add_argument("--reviewer", default="")
+    def _review(a):
+        plan = open(a.plan_file, encoding="utf-8").read() if a.plan_file else a.plan
+        op_review(db(), a.code, a.action, a.verdict, plan, a.findings, a.reviewer)
+    s.set_defaults(f=_review)
+
+    s = sub.add_parser("review-ok", help="检查近期是否有通过的审查(退出码 0/1)")
+    s.add_argument("code"); s.add_argument("--action", required=True, choices=REVIEW_ACTIONS)
+    s.add_argument("--within", type=int, default=30, help="分钟")
+    def _rok(a):
+        ok, msg = review_ok(db(), a.code, a.action, a.within)
+        print(("OK " if ok else "NO ") + msg)
+        sys.exit(0 if ok else 1)
+    s.set_defaults(f=_rok)
 
     s = sub.add_parser("show", help="项目详情")
     s.add_argument("code"); s.add_argument("-n", type=int, default=15)

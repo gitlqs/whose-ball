@@ -6,7 +6,7 @@
                       [--stages "阶段1,阶段2,..."] [--categories "类别1,类别2"]
 
 做的事：
-  1. 复制 tracker.py / index.html / tracker.bat 到 <target>/<subdir>
+  1. 复制 tracker.py / index.html / boss.html / tracker.bat 到 <target>/<subdir>
   2. 复制 hooks/tracker_hook.py 到 <target>/.claude/hooks/
   3. 写 <target>/.claude/tracker_hooks.json（hook 配置）
   4. 合并 hooks 进 <target>/.claude/settings.json（不覆盖已有 hook）
@@ -259,7 +259,7 @@ def main():
     ap.add_argument("--stages", default=None, help=f"阶段值，逗号分隔（默认 {DEFAULT_STAGES}；不传则不覆盖 db 里已有的值）")
     ap.add_argument("--categories", default=None, help=f"类别值，逗号分隔（默认 {DEFAULT_CATEGORIES}）")
     ap.add_argument("--skip-claude-md", action="store_true", help="不动 CLAUDE.md（已有手写的 tracker 段落时用）")
-    ap.add_argument("--force", action="store_true", help="覆盖已有的 tracker.py/index.html/tracker.bat/hook")
+    ap.add_argument("--force", action="store_true", help="覆盖已有的 tracker.py/index.html/boss.html/tracker.bat/hook")
     a = ap.parse_args()
     stages = a.stages or DEFAULT_STAGES
     categories = a.categories or DEFAULT_CATEGORIES
@@ -280,7 +280,7 @@ def main():
             sys.exit("项目根目录已有别的 index.html，请改用 --subdir tracker 安装到子目录。")
 
     print("[1/7] tracker 文件")
-    for name in ("tracker.py", "index.html", "tracker.bat"):
+    for name in ("tracker.py", "index.html", "boss.html", "tracker.bat"):
         copy_file(os.path.join(HERE, name), os.path.join(dest, name), a.force)
 
     print("[2/7] hook 脚本")

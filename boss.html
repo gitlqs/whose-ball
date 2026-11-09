@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>决策看板 · 球在谁手里</title>
+<style>
+:root{
+  --bg:#FAFAFA; --card:#FFFFFF; --ink:#09090B; --ink2:#3F3F46; --ink3:#71717A;
+  --line:#E4E4E7; --accent:#2563EB; --accent-soft:#EFF6FF;
+  --warn:#B45309; --warn-bg:#FEF3C7; --late:#B91C1C; --late-bg:#FEE2E2;
+  --ok:#15803D; --ok-bg:#DCFCE7;
+  --r:10px; --shadow:0 1px 2px rgba(0,0,0,.05);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+button,textarea{font:inherit}
+button{cursor:pointer}
+a{color:var(--accent)}
+.wrap{max-width:960px;margin:0 auto;padding:20px 16px 80px}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+header h1{font-size:21px;margin:0}
+header .sub{color:var(--ink3);font-size:13px}
+header .spacer{flex:1}
+.btn{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:6px 14px;color:var(--ink2);text-decoration:none;display:inline-block;line-height:1.4}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{filter:brightness(1.08);color:#fff}
+.btn.ok{background:var(--ok);border-color:var(--ok);color:#fff}
+.btn.confirm{background:var(--warn);border-color:var(--warn);color:#fff}
+.btn:disabled{opacity:.5;cursor:default}
+
+/* dashboard */
+.dash{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden;margin-bottom:22px}
+.dash table{width:100%;border-collapse:collapse}
+.dash th,.dash td{padding:8px 12px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+.dash th:first-child,.dash td:first-child{text-align:left;white-space:normal}
+.dash thead th{font-size:12px;color:var(--ink3);font-weight:600;background:#F4F4F5}
+.dash tbody tr:last-child td{border-bottom:none}
+.dash tfoot td{font-weight:700;background:#F4F4F5;border-bottom:none}
+.dash .dname{color:var(--ink3);font-size:12px;margin-left:6px}
+.num{font-variant-numeric:tabular-nums}
+.num.me{color:var(--late);font-weight:700}
+.num.zero{color:#C4C4CC;font-weight:400}
+
+/* sections */
+section{margin-bottom:24px}
+section h2{font-size:16px;margin:0 0 8px;display:flex;align-items:center;gap:8px}
+section h2 .cnt{font-size:12px;background:var(--accent-soft);color:var(--accent);border-radius:999px;padding:1px 9px;font-weight:600}
+.empty{color:var(--ink3);font-size:13px;padding:6px 2px}
+.item{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:10px 12px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start}
+.item .body{flex:1;min-width:0}
+.item .what{color:var(--ink);word-break:break-word}
+.meta{font-size:12px;color:var(--ink3);margin-top:3px;display:flex;flex-wrap:wrap;gap:4px 10px}
+.code{font-weight:600;color:var(--ink2)}
+.tag{font-size:11px;border:1px solid var(--line);border-radius:5px;padding:0 6px;color:var(--ink3)}
+.age.stale{color:var(--late);font-weight:600}
+.opts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.item.col{flex-direction:column;gap:0}
+textarea{width:100%;align-self:stretch;min-height:64px;margin-top:8px;border:1px solid var(--line);border-radius:8px;padding:8px;resize:vertical}
+textarea:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+.row-end{display:flex;justify-content:flex-end;margin-top:6px;align-self:stretch}
+.answered .what{color:var(--ink2)}
+.answered .ans{color:var(--ok);font-weight:600}
+details.other summary{cursor:pointer;font-size:16px;font-weight:600;margin-bottom:8px}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw}
+#toast.show{opacity:.92}
+#toast.err{background:var(--late)}
+@media (max-width:600px){
+  .wrap{padding:14px 10px 60px}
+  .dash th,.dash td{padding:7px 8px}
+  .dash .dname{display:block;margin-left:0}
+  .item{flex-direction:column;gap:8px}
+  .item>.btn{align-self:flex-end}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>决策看板</h1>
+    <span class="sub" id="sub">加载中…</span>
+    <span class="spacer"></span>
+    <a class="btn" href="/">项目看板</a>
+  </header>
+
+  <div class="dash" id="dash"></div>
+
+  <section>
+    <h2>待你审的草稿 <span class="cnt" id="n_drafts">0</span></h2>
+    <div id="drafts"></div>
+  </section>
+  <section>
+    <h2>待你决定 <span class="cnt" id="n_choices">0</span></h2>
+    <div id="choices"></div>
+  </section>
+  <section>
+    <h2>待你给意见 <span class="cnt" id="n_texts">0</span></h2>
+    <div id="texts"></div>
+  </section>
+  <section>
+    <h2>其他轮到你 <span class="cnt" id="n_other">0</span></h2>
+    <div id="other"></div>
+  </section>
+  <section id="answeredSec" hidden>
+    <h2>已答复、等转交 <span class="cnt" id="n_answered">0</span></h2>
+    <div id="answered"></div>
+  </section>
+</div>
+<div id="toast"></div>
+
+<script>
+let S = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function toast(msg, err){
+  const t = $("toast"); t.textContent = msg; t.className = "show" + (err ? " err" : "");
+  clearTimeout(t._h); t._h = setTimeout(() => t.className = "", 2600);
+}
+
+async function load(){
+  try{
+    const r = await fetch("/api/boss", {cache:"no-store"});
+    S = await r.json(); render();
+  }catch(e){ toast("读取失败: " + e, true); }
+}
+
+async function post(action, args, okMsg){
+  try{
+    const r = await fetch("/api", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({action, args, view:"boss"})});
+    const j = await r.json();
+    if(!r.ok){ toast(j.error || "失败", true); return false; }
+    S = j; render(); toast(okMsg); return true;
+  }catch(e){ toast("提交失败: " + e, true); return false; }
+}
+
+function meta(x){
+  const stale = S && x.age !== undefined && x.age >= S.stale_days;
+  return `<div class="meta">
+    <span class="code">${esc(x.code)}</span>
+    ${x.dept ? `<span class="tag">${esc(x.dept)}</span>` : ""}
+    ${x.who ? `<span>@${esc(x.who)}</span>` : ""}
+    ${x.age !== undefined ? `<span class="age ${stale?"stale":""}">${x.age} 天</span>` : ""}
+    ${x.created_by ? `<span>来自 ${esc(x.created_by)}</span>` : ""}
+    ${x.created_at ? `<span>${esc(x.created_at)}</span>` : ""}
+  </div>`;
+}
+
+function n(v, cls){ return `<td class="num ${v ? cls||"" : "zero"}">${v}</td>`; }
+
+function render(){
+  $("sub").textContent = `更新于 ${S.now} · 每 60 秒自动刷新`;
+  // dashboard
+  const tot = {me:0, internal:0, external:0};
+  const rows = S.stats.map(s => {
+    tot.me += s.me; tot.internal += s.internal; tot.external += s.external;
+    return `<tr><td><b>${esc(s.code || "—")}</b><span class="dname">${esc(s.name)}</span></td>
+      ${n(s.me,"me")}${n(s.internal)}${n(s.external)}</tr>`;
+  }).join("");
+  $("dash").innerHTML = `<table>
+    <thead><tr><th>部门</th><th>轮到${S.owner === "我" ? "我" : " " + esc(S.owner)}</th><th>内部在做</th><th>等外部</th></tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr><td>合计</td>${n(tot.me,"me")}${n(tot.internal)}${n(tot.external)}</tr></tfoot></table>`;
+
+  // drafts
+  $("n_drafts").textContent = S.drafts.length;
+  $("drafts").innerHTML = S.drafts.length ? S.drafts.map(w => `
+    <div class="item"><div class="body"><div class="what">${esc(w.what)}</div>${meta(w)}</div>
+      <button class="btn primary" data-sent="${w.id}">已发</button></div>`).join("")
+    : `<div class="empty">没有待审草稿</div>`;
+
+  // choices (+ ack)
+  $("n_choices").textContent = S.choices.length;
+  $("choices").innerHTML = S.choices.length ? S.choices.map(d => `
+    <div class="item col"><div class="what">${esc(d.question)}</div>${meta(d)}
+      <div class="opts">${d.kind === "ack"
+        ? `<button class="btn ok" data-ans="${d.id}" data-val="">知道了</button>`
+        : d.options.map(o => `<button class="btn" data-ans="${d.id}" data-val="${esc(o)}">${esc(o)}</button>`).join("")}
+      </div></div>`).join("")
+    : `<div class="empty">没有待决定事项</div>`;
+
+  // texts — 保留正在输入的内容
+  const drafts = {};
+  document.querySelectorAll("textarea[data-tid]").forEach(t => drafts[t.dataset.tid] = t.value);
+  $("n_texts").textContent = S.texts.length;
+  $("texts").innerHTML = S.texts.length ? S.texts.map(d => `
+    <div class="item col"><div class="what">${esc(d.question)}</div>${meta(d)}
+      <textarea data-tid="${d.id}" placeholder="写下你的意见…">${esc(drafts[d.id] || "")}</textarea>
+      <div class="row-end"><button class="btn primary" data-txt="${d.id}">提交</button></div></div>`).join("")
+    : `<div class="empty">没有待给意见的事项</div>`;
+
+  // other me
+  $("n_other").textContent = S.other_me.length;
+  $("other").innerHTML = S.other_me.length ? S.other_me.map(w => `
+    <div class="item"><div class="body"><div class="what">${esc(w.what)}</div>${meta(w)}</div></div>`).join("")
+    : `<div class="empty">没有其他轮到你的事</div>`;
+
+  // answered, not yet consumed
+  $("answeredSec").hidden = !S.answered.length;
+  $("n_answered").textContent = S.answered.length;
+  $("answered").innerHTML = S.answered.map(d => `
+    <div class="item answered"><div class="body"><div class="what">${esc(d.question)} → <span class="ans">${esc(d.answer)}</span></div>
+      <div class="meta"><span class="code">${esc(d.code)}</span>${d.dept?`<span class="tag">${esc(d.dept)}</span>`:""}<span>答于 ${esc(d.answered_at)}</span></div></div></div>`).join("");
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button"); if(!b || b.disabled) return;
+  if(b.dataset.sent){
+    // 两步确认：第一次点变成「确认已发？」，3 秒内再点才执行
+    if(!b.classList.contains("confirm")){
+      b.classList.add("confirm"); b.textContent = "确认已发？";
+      setTimeout(() => { if(b.isConnected){ b.classList.remove("confirm"); b.textContent = "已发"; } }, 3000);
+      return;
+    }
+    b.disabled = true;
+    await post("sent", {id: +b.dataset.sent}, "已标记发出") || (b.disabled = false);
+  } else if(b.dataset.ans){
+    b.disabled = true;
+    await post("answer", {id: +b.dataset.ans, answer: b.dataset.val}, "已记录: " + (b.dataset.val || "知道了")) || (b.disabled = false);
+  } else if(b.dataset.txt){
+    const t = document.querySelector(`textarea[data-tid="${b.dataset.txt}"]`);
+    if(!t.value.trim()){ toast("先写点什么", true); t.focus(); return; }
+    b.disabled = true;
+    await post("answer", {id: +b.dataset.txt, answer: t.value}, "意见已提交") || (b.disabled = false);
+  }
+});
+
+// 每 60 秒刷新；有人正在打字时跳过这一轮
+setInterval(() => {
+  const a = document.activeElement;
+  if(a && a.tagName === "TEXTAREA" && a.value) return;
+  load();
+}, 60000);
+load();
+</script>
+</body>
+</html>

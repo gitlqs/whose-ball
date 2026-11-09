@@ -41,19 +41,21 @@ python /path/to/whose-ball/install.py --target /path/to/your/project [--subdir t
 
 | 表 | 含义 |
 |---|---|
-| projects | 项目：代号（唯一，支持子串匹配）、一句话身份、类别、阶段、active/closed |
+| projects | 项目：代号（唯一，支持子串匹配）、一句话身份、类别、阶段、部门（dept，可选）、active/closed |
 | waits | 等待项：party（customer/vendor/internal/me）、等谁、等什么、起始日、最后催促日、是否完成 |
 | events | 时间线，所有操作自动落一条，`log` 手动加 |
 | notes | 笔记，同名标题覆盖（适合"档案""需求"这种长期维护的） |
 | refs | 链接/路径，带标签 |
-| settings | `stale_days`（默认 5）、`pipeline_stages`（看板顶部流水线） |
+| decisions | 提请人拍板的事：kind（choice 选项 / text 文字意见 / ack 知悉）、问题、选项、答复、答复时间、转交时间、提问者 |
+| reviews | 落笔前审查记录：action（email / sf_create / sf_update）、计划、pass/fail、发现、审查人、时间；`review-ok` 供 hook 判断 |
+| settings | `stale_days`（默认 5）、`pipeline_stages`（看板顶部流水线）、`departments`（部门表 JSON，`depts --set` 写）、`owner_name`（/boss 上"轮到 X"）、`draft_review_pattern`（/boss 识别待审草稿的关键词，`|` 分隔，默认 `审核发出`） |
 
 全部存在 `tracker.db`（SQLite），和 `tracker.py` 同目录。web 写操作前自动快照到 `tracker.db.undo`，看板上可撤回一步。
 
 ## CLI
 
 ```
-add 代号 -t "一句话" -c 类别 -s 阶段        新项目
+add 代号 -t "一句话" -c 类别 -s 阶段 [-d 部门]  新项目
 wait 代号 customer|vendor|internal|me "等什么" --who 人名 [--since 日期] [--clear]
                                               球转手；--clear 先了结旧等待项
 done WAIT_ID ["备注"]                          等待项完成
@@ -61,13 +63,25 @@ nudge WAIT_ID ["备注"]                         记一次催促（重置计时�
 log 代号 "发生了什么" [--ts 时间]              时间线
 note 代号 "标题" "内容" | -f 文件               笔记
 ref 代号 "标签" "URL或路径"                     链接
-update 代号 [-t] [-c] [-s 阶段] [--status]     改字段
+update 代号 [-t] [-c] [-s 阶段] [-d 部门] [--status]  改字段
 close 代号 ["原因"]                            关闭，自动了结所有等待项
-list [--all]                                  按等待方分组，超期标 ⚠
+list [--all] [--dept 部门|-]                  按等待方分组，超期标 ⚠；- = 未分部门
 show 代号 [-n 15]                              详情 + 最近时间线
 set key value                                 stale_days / pipeline_stages
-serve [--port 8765]                           web 看板
+serve [--port 8765]                           web 看板（/ 项目看板，/boss 决策看板）
+
+depts [--set "CODE=名称;CODE=名称"]            部门表（不配置则 dept 不校验）
+ask 代号 "问题" --options "A|B|C" | --text | --ack [--by 提问者]   提请决策
+decisions [--pending | --answered-unconsumed] 列决策
+answer ID ["答复"]                             答复（等同 /boss 上点按钮）
+consume ID                                    标记答复已转交处理
+review 代号 --action email|sf_create|sf_update --verdict pass|fail [--plan-file F | --plan T] [--findings ...] [--reviewer ...]
+review-ok 代号 --action X [--within 30]        最近一条审查是 pass 且在 N 分钟内 → 退出码 0，否则 1
 ```
+
+### /boss 决策看板
+
+给"只想看要我做什么"的人：顶部按部门统计 轮到我 / 内部在做 / 等外部；下面是 待审草稿（party=me 且 what 命中 `draft_review_pattern`，带「已发」按钮 = done + 记时间线）、待决定（choice/ack 按钮）、待给意见（文本框）、其他轮到我、已答待转交。回写走 POST /api，写 `decisions.answer/answered_at`；agent 读 `decisions --answered-unconsumed` 处理后 `consume`。每 60 秒自动刷新，手机宽度可用。
 
 ## Hooks：让 agent 每回合都同步
 
@@ -94,6 +108,7 @@ python "$CLAUDE_PROJECT_DIR/.claude/hooks/tracker_hook.py" prompt
 ```
 tracker.py            CLI + HTTP server（单文件）
 index.html            看板（单页，无构建）
+boss.html             决策看板 /boss（单页，无构建）
 tracker.bat           Windows 一键启动
 install.py            装进 Claude Code 项目的安装器（幂等）
 hooks/tracker_hook.py Claude Code hooks

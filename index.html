@@ -25,6 +25,7 @@ header h1{font-size:22px;margin:0;letter-spacing:.5px}
 header .sub{color:var(--ink3);font-size:13px}
 header .spacer{flex:1}
 .btn{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:6px 14px;color:var(--ink2);transition:border-color .15s,color .15s}
+a.btn{text-decoration:none;display:inline-block}
 .btn:hover{border-color:var(--accent);color:var(--accent)}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .btn.primary:hover{background:#1D4ED8}
@@ -140,6 +141,7 @@ dialog .dlgbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
     <h1>球在谁手里</h1>
     <span class="sub" id="todaySub"></span>
     <span class="spacer"></span>
+    <a class="btn" href="/boss">决策看板</a>
     <button class="btn primary" onclick="dlgAddProject()">＋ 新项目</button>
   </header>
 
@@ -347,6 +349,7 @@ function fillDrawer(pid){
     <div class="meta">
       ${p.stage?`<span class="stage">${esc(p.stage)}</span>`:""}
       ${p.category?`<span>${esc(p.category)}</span>`:""}
+      ${p.dept?`<span>${esc(p.dept)}</span>`:""}
       <span>${p.status==="active"?"进行中":"已关闭"}</span>
     </div>
     <div class="dsec"><h3>等待项</h3>${waits}</div>
