@@ -301,7 +301,7 @@ document.addEventListener("click", async e => {
       return;
     }
     b.disabled = true;
-    await post("void", {id: +b.dataset.void, reason: "Qiushi 在 /boss 作废"}, "已作废") || (b.disabled = false);
+    await post("void", {id: +b.dataset.void, reason: `${S.owner && S.owner !== "我" ? S.owner + " " : ""}在 /boss 作废`}, "已作废") || (b.disabled = false);
   } else if(b.dataset.ans){
     b.disabled = true;
     await post("answer", {id: +b.dataset.ans, answer: b.dataset.val}, "已记录: " + (b.dataset.val || "知道了")) || (b.disabled = false);
