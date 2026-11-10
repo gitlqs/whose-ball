@@ -23,7 +23,8 @@
 决策（给人拍板，显示在 /boss）:
   python tracker.py ask 代号 "问题" --options "A|B|C" | --text | --ack
   python tracker.py decisions [--pending | --answered-unconsumed]
-  python tracker.py answer ID "答复"      python tracker.py consume ID
+  python tracker.py answer ID "答复" | --other "在 session 里定的答案"
+  python tracker.py consume ID           python tracker.py void ID "原因"   (close 项目会自动作废未答的)
 落笔前审查记录:
   python tracker.py review 代号 --action email|sf_create|sf_update --verdict pass|fail
                            [--plan-file 文件 | --plan 文字] [--findings ...] [--reviewer ...]
@@ -114,7 +115,10 @@ MIGRATIONS = [("projects", "dept", "TEXT DEFAULT ''"),
               ("waits", "mailbox", "TEXT DEFAULT ''"),       # 邮件在哪个邮箱(自由文本, 如 qt / tt)
               ("waits", "search", "TEXT DEFAULT ''"),        # 能定位那封邮件的邮箱搜索串
               ("waits", "mail_folder", "TEXT DEFAULT ''"),   # inbox / drafts / sent
-              ("waits", "mail_to", "TEXT DEFAULT ''")]       # 草稿的实际收件人
+              ("waits", "mail_to", "TEXT DEFAULT ''"),       # 草稿的实际收件人
+              ("decisions", "answer_source", "TEXT DEFAULT ''"),  # '' = 看板/预设选项, 'other' = 在别处(session 里)口头定的
+              ("decisions", "voided_at", "TEXT"),            # 作废时间: 不再需要答复(项目关了 / 已在别处定)
+              ("decisions", "void_reason", "TEXT DEFAULT ''")]
 MAIL_FOLDERS = ("inbox", "drafts", "sent", "")
 
 
@@ -228,11 +232,14 @@ def op_update(conn, code, title=None, category=None, stage=None, status=None, de
             "UPDATE projects SET status=?, closed_at=? WHERE id=?", (status, closed_at, p["id"])
         )
         changes.append("重新打开" if status == "active" else "关闭项目")
-        if status == "closed":  # 关单时了结所有未完成等待项
+        if status == "closed":  # 关单时了结所有未完成等待项, 作废所有未答决策
             conn.execute(
                 "UPDATE waits SET done=1, done_at=? WHERE project_id=? AND done=0",
                 (now(), p["id"]),
             )
+            voided = void_open_decisions(conn, p["id"], "项目已关闭")
+            if voided:
+                changes.append("作废未答决策 " + ", ".join(f"#{i}" for i in voided))
     for c in changes:
         add_event(conn, p["id"], c)
     conn.commit()
@@ -378,24 +385,57 @@ def op_ask(conn, code, question, kind, options=None, created_by=""):
     return cur.lastrowid
 
 
-def op_answer(conn, did, answer):
+def op_answer(conn, did, answer, other=False):
+    """other=True: 记录在别处(项目 session 里)口头定的答案, 不必匹配预设选项, answer_source 记 'other'。"""
     d = conn.execute("SELECT * FROM decisions WHERE id=?", (did,)).fetchone()
     if not d:
         sys.exit(f"找不到决策 #{did}")
     if d["consumed_at"]:
         sys.exit(f"决策 #{did} 已被转交处理，不能再改")
+    if d["voided_at"]:
+        sys.exit(f"决策 #{did} 已于 {d['voided_at']} 作废（{d['void_reason']}）")
     answer = (answer or "").strip()
-    if d["kind"] == "ack":
+    if d["kind"] == "ack" and not other:
         answer = answer or "已知悉"
     if not answer:
         sys.exit("答复不能为空")
     opts = json.loads(d["options"] or "[]")
-    if d["kind"] == "choice" and answer not in opts:
-        sys.exit(f"'{answer}' 不在选项里: " + " / ".join(opts))
-    conn.execute("UPDATE decisions SET answer=?, answered_at=? WHERE id=?", (answer, now(), did))
-    add_event(conn, d["project_id"], f"决策#{did} 答复: {answer}（问: {d['question']}）")
+    if d["kind"] == "choice" and not other and answer not in opts:
+        sys.exit(f"'{answer}' 不在选项里: " + " / ".join(opts) + "（在别处定的答案用 --other）")
+    source = "other" if other else ""
+    conn.execute("UPDATE decisions SET answer=?, answered_at=?, answer_source=? WHERE id=?",
+                 (answer, now(), source, did))
+    tag = "（在别处定的）" if other else ""
+    add_event(conn, d["project_id"], f"决策#{did} 答复{tag}: {answer}（问: {d['question']}）")
     conn.commit()
-    print(f"decision#{did} 已答复: {answer}")
+    print(f"decision#{did} 已答复{tag}: {answer}")
+
+
+def void_open_decisions(conn, pid, reason):
+    """作废项目下所有未答、未作废的决策, 返回 id 列表（调用方负责 commit）。"""
+    ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM decisions WHERE project_id=? AND answered_at IS NULL AND voided_at IS NULL "
+        "AND consumed_at IS NULL ORDER BY id", (pid,))]
+    for i in ids:
+        conn.execute("UPDATE decisions SET voided_at=?, void_reason=? WHERE id=?", (now(), reason, i))
+    return ids
+
+
+def op_void(conn, did, reason):
+    d = conn.execute("SELECT * FROM decisions WHERE id=?", (did,)).fetchone()
+    if not d:
+        sys.exit(f"找不到决策 #{did}")
+    if d["voided_at"]:
+        sys.exit(f"决策 #{did} 已于 {d['voided_at']} 作废过（{d['void_reason']}）")
+    if d["consumed_at"]:
+        sys.exit(f"决策 #{did} 已于 {d['consumed_at']} 转交处理，不用作废")
+    reason = (reason or "").strip()
+    if not reason:
+        sys.exit("作废要写原因")
+    conn.execute("UPDATE decisions SET voided_at=?, void_reason=? WHERE id=?", (now(), reason, did))
+    add_event(conn, d["project_id"], f"决策#{did} 作废: {reason}（问: {d['question']}）")
+    conn.commit()
+    print(f"decision#{did} 已作废: {reason}")
 
 
 def op_consume(conn, did):
@@ -406,6 +446,8 @@ def op_consume(conn, did):
         sys.exit(f"决策 #{did} 还没答复")
     if d["consumed_at"]:
         sys.exit(f"决策 #{did} 已于 {d['consumed_at']} 转交过")
+    if d["voided_at"]:
+        sys.exit(f"决策 #{did} 已作废（{d['void_reason']}），不用转交")
     conn.execute("UPDATE decisions SET consumed_at=? WHERE id=?", (now(), did))
     add_event(conn, d["project_id"], f"决策#{did} 已转交处理: {d['answer']}")
     conn.commit()
@@ -542,8 +584,11 @@ def fmt_decision(d, code):
     s = f"decision#{d['id']} [{code}] ({d['kind']}) {d['question']}"
     if opts:
         s += "  选项: " + " / ".join(opts)
-    if d["answered_at"]:
-        s += f"  → {d['answer']} ({d['answered_at']})"
+    if d["voided_at"]:
+        s += f"  [已作废 {d['voided_at']}: {d['void_reason']}]"
+    elif d["answered_at"]:
+        src = "（在别处定的）" if d["answer_source"] == "other" else ""
+        s += f"  → {d['answer']}{src} ({d['answered_at']})"
         s += f" [已转交 {d['consumed_at']}]" if d["consumed_at"] else " [待转交]"
     else:
         s += "  [待答]"
@@ -554,9 +599,11 @@ def cmd_decisions(args):
     conn = db()
     q = "SELECT d.*, p.code FROM decisions d JOIN projects p ON p.id=d.project_id"
     if args.pending:
-        q += " WHERE d.answered_at IS NULL"
+        q += " WHERE d.answered_at IS NULL AND d.voided_at IS NULL"
     elif args.answered_unconsumed:
-        q += " WHERE d.answered_at IS NOT NULL AND d.consumed_at IS NULL"
+        q += " WHERE d.answered_at IS NOT NULL AND d.consumed_at IS NULL AND d.voided_at IS NULL"
+    elif args.voided:
+        q += " WHERE d.voided_at IS NOT NULL"
     rows = conn.execute(q + " ORDER BY d.id").fetchall()
     for d in rows:
         print(fmt_decision(d, d["code"]))
@@ -640,7 +687,7 @@ def boss_state(conn):
     decs = []
     for d in conn.execute(
             "SELECT d.*, p.code, p.title, p.dept FROM decisions d JOIN projects p ON p.id=d.project_id "
-            "WHERE d.consumed_at IS NULL AND p.status='active' ORDER BY d.id"):
+            "WHERE d.consumed_at IS NULL AND d.voided_at IS NULL AND p.status='active' ORDER BY d.id"):
         x = dict(d)
         x["options"] = json.loads(d["options"] or "[]")
         x["project"] = project_ctx(conn, d["project_id"], cache)
@@ -757,7 +804,8 @@ def cmd_serve(args):
                                                     a.get("category"), a.get("stage"), a.get("status"),
                                                     a.get("dept")),
                         "sent": lambda: op_sent(conn, int(a["id"])),
-                        "answer": lambda: op_answer(conn, int(a["id"]), a.get("answer", "")),
+                        "answer": lambda: op_answer(conn, int(a["id"]), a.get("answer", ""), bool(a.get("other"))),
+                        "void": lambda: op_void(conn, int(a["id"]), a.get("reason", "")),
                         "wait": lambda: op_wait(conn, a["code"], a["party"], a["what"], a.get("who", ""),
                                                 a.get("since"), a.get("clear", False), quiet=True,
                                                 mailbox=a.get("mailbox", ""), search=a.get("search", ""),
@@ -894,11 +942,21 @@ def main():
     g = s.add_mutually_exclusive_group()
     g.add_argument("--pending", action="store_true", help="未答")
     g.add_argument("--answered-unconsumed", action="store_true", help="已答未转交")
+    g.add_argument("--voided", action="store_true", help="已作废")
     s.set_defaults(f=cmd_decisions)
+
+    s = sub.add_parser("void", help="作废决策(不再需要答复: 项目关了 / 已在别处定且不用转交)")
+    s.add_argument("id", type=int); s.add_argument("reason")
+    s.set_defaults(f=lambda a: op_void(db(), a.id, a.reason))
 
     s = sub.add_parser("answer", help="答复决策(等同 /boss 上点按钮)")
     s.add_argument("id", type=int); s.add_argument("answer", nargs="?", default="")
-    s.set_defaults(f=lambda a: op_answer(db(), a.id, a.answer))
+    s.add_argument("--other", metavar="TEXT", help="在别处(session 里)口头定的答案, 不必匹配预设选项")
+    def _answer(a):
+        if a.other is not None and a.answer:
+            sys.exit("答案二选一: 位置参数(预设选项) 或 --other \"自由文本\"")
+        op_answer(db(), a.id, a.other if a.other is not None else a.answer, other=a.other is not None)
+    s.set_defaults(f=_answer)
 
     s = sub.add_parser("consume", help="标记决策答复已转交处理")
     s.add_argument("id", type=int)

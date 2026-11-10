@@ -46,7 +46,7 @@ python /path/to/whose-ball/install.py --target /path/to/your/project [--subdir t
 | events | 时间线，所有操作自动落一条，`log` 手动加 |
 | notes | 笔记，同名标题覆盖（适合"档案""需求"这种长期维护的） |
 | refs | 链接/路径，带标签 |
-| decisions | 提请人拍板的事：kind（choice 选项 / text 文字意见 / ack 知悉）、问题、选项、答复、答复时间、转交时间、提问者 |
+| decisions | 提请人拍板的事：kind（choice 选项 / text 文字意见 / ack 知悉）、问题、选项、答复（answer_source=other 表示在别处定的）、答复时间、转交时间、作废时间和原因、提问者 |
 | reviews | 落笔前审查记录：action（email / sf_create / sf_update）、计划、pass/fail、发现、审查人、时间；`review-ok` 供 hook 判断 |
 | settings | `stale_days`（默认 5）、`pipeline_stages`（看板顶部流水线）、`departments`（部门表 JSON，`depts --set` 写）、`owner_name`（/boss 上"轮到 X"）、`draft_review_pattern`（/boss 识别待审草稿的关键词，`|` 分隔，默认 `审核发出`） |
 
@@ -75,8 +75,10 @@ serve [--port 8765]                           web 看板（/ 项目看板，/bos
 
 depts [--set "CODE=名称;CODE=名称"]            部门表（不配置则 dept 不校验）
 ask 代号 "问题" --options "A|B|C" | --text | --ack [--by 提问者]   提请决策
-decisions [--pending | --answered-unconsumed] 列决策
+decisions [--pending | --answered-unconsumed | --voided] 列决策
 answer ID ["答复"]                             答复（等同 /boss 上点按钮）
+answer ID --other "自由文本"                  记录在别处（项目 session 里）口头定的答案，不必匹配预设选项，标为 other
+void ID "原因"                                作废：不再需要答复；/boss 与 decisions --pending 不再列出（close 项目会自动作废其未答决策）
 consume ID                                    标记答复已转交处理
 review 代号 --action email|sf_create|sf_update --verdict pass|fail [--plan-file F | --plan T] [--findings ...] [--reviewer ...]
 review-ok 代号 --action X [--within 30]        最近一条审查是 pass 且在 N 分钟内 → 退出码 0，否则 1

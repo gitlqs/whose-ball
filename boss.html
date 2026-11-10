@@ -31,6 +31,8 @@ header .spacer{flex:1}
 .btn.confirm{background:var(--warn);border-color:var(--warn);color:#fff}
 .btn.sm{padding:2px 10px;font-size:13px}
 .btn:disabled{opacity:.5;cursor:default}
+.btn.void{color:var(--ink3);border-style:dashed}
+.btn.void:hover{color:var(--late);border-color:var(--late)}
 
 /* dashboard */
 .dash{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden;margin-bottom:22px}
@@ -248,15 +250,15 @@ function render(){
 
   $("n_choices").textContent = S.choices.length;
   $("choices").innerHTML = S.choices.map(d => card({p:d.project, todo:d.question,
-      actions: d.kind === "ack"
+      actions: `<button class="btn sm void" data-void="${d.id}" title="不再需要答复（已在别处定 / 不跟了）">作废</button><span style="flex:1"></span>` + (d.kind === "ack"
         ? `<button class="btn ok" data-ans="${d.id}" data-val="">知道了</button>`
-        : d.options.map(o => `<button class="btn" data-ans="${d.id}" data-val="${esc(o)}">${esc(o)}</button>`).join("")
+        : d.options.map(o => `<button class="btn" data-ans="${d.id}" data-val="${esc(o)}">${esc(o)}</button>`).join(""))
     })).join("") || `<div class="empty">没有待决定事项</div>`;
 
   $("n_texts").textContent = S.texts.length;
   $("texts").innerHTML = S.texts.map(d => card({p:d.project, todo:d.question,
       extra:`<textarea data-tid="${d.id}" placeholder="写下你的意见…">${esc(typed[d.id] || "")}</textarea>`,
-      actions:`<button class="btn primary" data-txt="${d.id}">提交</button>`})).join("")
+      actions:`<button class="btn sm void" data-void="${d.id}" title="不再需要答复（已在别处定 / 不跟了）">作废</button><span style="flex:1"></span><button class="btn primary" data-txt="${d.id}">提交</button>`})).join("")
     || `<div class="empty">没有待给意见的事项</div>`;
 
   $("n_other").textContent = S.other_me.length;
@@ -292,6 +294,14 @@ document.addEventListener("click", async e => {
     }
     b.disabled = true;
     await post("sent", {id: +b.dataset.sent}, "已标记发出") || (b.disabled = false);
+  } else if(b.dataset.void){
+    if(!b.classList.contains("confirm")){
+      b.classList.add("confirm"); b.textContent = "确认作废？";
+      setTimeout(() => { if(b.isConnected){ b.classList.remove("confirm"); b.textContent = "作废"; } }, 3000);
+      return;
+    }
+    b.disabled = true;
+    await post("void", {id: +b.dataset.void, reason: "Qiushi 在 /boss 作废"}, "已作废") || (b.disabled = false);
   } else if(b.dataset.ans){
     b.disabled = true;
     await post("answer", {id: +b.dataset.ans, answer: b.dataset.val}, "已记录: " + (b.dataset.val || "知道了")) || (b.disabled = false);
