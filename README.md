@@ -41,8 +41,8 @@ python /path/to/whose-ball/install.py --target /path/to/your/project [--subdir t
 
 | 表 | 含义 |
 |---|---|
-| projects | 项目：代号（唯一，支持子串匹配）、一句话身份、类别、阶段、部门（dept，可选）、active/closed |
-| waits | 等待项：party（customer/vendor/internal/me）、等谁、等什么、起始日、最后催促日、是否完成 |
+| projects | 项目：代号（唯一，支持子串匹配）、一句话身份、类别、阶段、部门（dept，可选）、背景（brief，2-3 行）、项目 session 链接、active/closed |
+| waits | 等待项：party（customer/vendor/internal/me）、等谁、等什么、起始日、最后催促日、是否完成；可选邮件定位：mailbox（哪个邮箱）、search（能搜到那封邮件的搜索串）、mail_folder（inbox/drafts/sent）、mail_to（草稿实际收件人） |
 | events | 时间线，所有操作自动落一条，`log` 手动加 |
 | notes | 笔记，同名标题覆盖（适合"档案""需求"这种长期维护的） |
 | refs | 链接/路径，带标签 |
@@ -57,7 +57,10 @@ python /path/to/whose-ball/install.py --target /path/to/your/project [--subdir t
 ```
 add 代号 -t "一句话" -c 类别 -s 阶段 [-d 部门]  新项目
 wait 代号 customer|vendor|internal|me "等什么" --who 人名 [--since 日期] [--clear]
-                                              球转手；--clear 先了结旧等待项
+     [--mail 邮箱 --search '搜索串' [--folder inbox|drafts|sent] [--to 收件人]]
+                                              球转手；--clear 先了结旧等待项；--mail/--search 让 /boss 卡片能一键复制搜索串
+wait-mail WAIT_ID [--mail] [--search] [--folder] [--to]   给已有等待项补/改邮件定位
+brief 代号 ["背景 2-3 行"] [--session 链接或id]  项目背景（/boss 卡片顶部），状态变了就更新
 done WAIT_ID ["备注"]                          等待项完成
 nudge WAIT_ID ["备注"]                         记一次催促（重置计时）
 log 代号 "发生了什么" [--ts 时间]              时间线
@@ -81,7 +84,7 @@ review-ok 代号 --action X [--within 30]        最近一条审查是 pass 且�
 
 ### /boss 决策看板
 
-给"只想看要我做什么"的人：顶部按部门统计 轮到我 / 内部在做 / 等外部；下面是 待审草稿（party=me 且 what 命中 `draft_review_pattern`，带「已发」按钮 = done + 记时间线）、待决定（choice/ack 按钮）、待给意见（文本框）、其他轮到我、已答待转交。回写走 POST /api，写 `decisions.answer/answered_at`；agent 读 `decisions --answered-unconsumed` 处理后 `consume`。每 60 秒自动刷新，手机宽度可用。
+给"只想看要我做什么"的人：顶部按部门统计 轮到我 / 内部在做 / 等外部；下面每张卡都是 标题（部门 · 项目一句话）/ 背景 / 进展（最近 4 条，可展开全部）/ 现在（阶段 + 所有未完成等待项）/ 要你做 / 邮件（邮箱、文件夹、收件人、一键复制的搜索串）/ 链接（refs 里的网址 + 项目 session）。分组：待审草稿（party=me 且 what 命中 `draft_review_pattern`，带「已发」按钮 = done + 记时间线）、待决定（choice/ack 按钮）、待给意见（文本框）、其他轮到我、已答待转交。回写走 POST /api，写 `decisions.answer/answered_at`；agent 读 `decisions --answered-unconsumed` 处理后 `consume`。每 60 秒自动刷新，手机宽度可用。
 
 ## Hooks：让 agent 每回合都同步
 

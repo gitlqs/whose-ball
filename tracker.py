@@ -14,6 +14,9 @@
   python tracker.py update 代号 [-t ...] [-s 阶段] [--status active|closed]
   python tracker.py close 代号 ["原因"]
   python tracker.py list [--all] [--dept D] / show 代号 / serve [--port 8765]
+  python tracker.py brief 代号 ["背景 2-3 行"] [--session 链接或id]
+  python tracker.py wait ... [--mail qt|tt --search '<查询>' [--folder inbox|drafts|sent] [--to 收件人]]
+  python tracker.py wait-mail WAIT_ID [--mail ..] [--search ..] [--folder ..] [--to ..]
 
 部门（可选，代码从配置读，不写死）:
   python tracker.py depts [--set "CODE=名称;CODE=名称"]   add/update 用 -d/--dept
@@ -105,7 +108,14 @@ CREATE INDEX IF NOT EXISTS idx_reviews_lookup ON reviews(project_id, action, cre
 DECISION_KINDS = ("choice", "text", "ack")
 REVIEW_ACTIONS = ("email", "sf_create", "sf_update")
 # 旧库补列：(表, 列, 定义)
-MIGRATIONS = [("projects", "dept", "TEXT DEFAULT ''")]
+MIGRATIONS = [("projects", "dept", "TEXT DEFAULT ''"),
+              ("projects", "brief", "TEXT DEFAULT ''"),      # 背景: 2-3 行, 什么事/谁/要什么, 状态变了就更新
+              ("projects", "session", "TEXT DEFAULT ''"),    # 项目 session 链接(claude://...)
+              ("waits", "mailbox", "TEXT DEFAULT ''"),       # 邮件在哪个邮箱(自由文本, 如 qt / tt)
+              ("waits", "search", "TEXT DEFAULT ''"),        # 能定位那封邮件的邮箱搜索串
+              ("waits", "mail_folder", "TEXT DEFAULT ''"),   # inbox / drafts / sent
+              ("waits", "mail_to", "TEXT DEFAULT ''")]       # 草稿的实际收件人
+MAIL_FOLDERS = ("inbox", "drafts", "sent", "")
 
 
 def db():
@@ -229,24 +239,67 @@ def op_update(conn, code, title=None, category=None, stage=None, status=None, de
     print(f"[{p['code']}] " + ("; ".join(changes) if changes else "无变化"))
 
 
-def op_wait(conn, code, party, what, who="", since=None, clear=False, quiet=False):
+def check_mail_args(mailbox, search, folder):
+    if folder is not None and folder not in MAIL_FOLDERS:
+        sys.exit("--folder 必须是 inbox / drafts / sent")
+    if (folder or mailbox) and not search:
+        sys.exit("给了 --mail/--folder 就要同时给 --search（能在邮箱里搜到那封邮件的搜索串）")
+
+
+def op_wait(conn, code, party, what, who="", since=None, clear=False, quiet=False,
+            mailbox="", search="", folder="", mail_to=""):
     if party not in PARTIES:
         sys.exit(f"party 必须是 {'/'.join(PARTIES)} 之一")
+    check_mail_args(mailbox, search, folder or None)
     p = find_project(conn, code)
     if clear:
         conn.execute(
             "UPDATE waits SET done=1, done_at=? WHERE project_id=? AND done=0", (now(), p["id"])
         )
     cur = conn.execute(
-        "INSERT INTO waits(project_id,party,who,what,since,created_at) VALUES(?,?,?,?,?,?)",
-        (p["id"], party, who, what, since or today(), now()),
+        "INSERT INTO waits(project_id,party,who,what,since,created_at,mailbox,search,mail_folder,mail_to) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (p["id"], party, who, what, since or today(), now(), mailbox or "", search or "",
+         folder or "", mail_to or ""),
     )
     label = PARTY_CN[party] + (f"({who})" if who else "")
     add_event(conn, p["id"], f"{label}: {what}")
     conn.commit()
     if not quiet:
-        print(f"[{p['code']}] wait#{cur.lastrowid} {label}: {what}")
+        mail = f"  [{mailbox or '?'}{'/' + folder if folder else ''}] {search}" if search else ""
+        print(f"[{p['code']}] wait#{cur.lastrowid} {label}: {what}{mail}")
     return cur.lastrowid
+
+
+def op_wait_mail(conn, wait_id, mailbox=None, search=None, folder=None, mail_to=None):
+    """给已有等待项补/改邮件定位信息（不记时间线）。"""
+    w = conn.execute("SELECT * FROM waits WHERE id=?", (wait_id,)).fetchone()
+    if not w:
+        sys.exit(f"找不到等待项 #{wait_id}")
+    new = {"mailbox": w["mailbox"] if mailbox is None else mailbox,
+           "search": w["search"] if search is None else search,
+           "mail_folder": w["mail_folder"] if folder is None else folder,
+           "mail_to": w["mail_to"] if mail_to is None else mail_to}
+    check_mail_args(new["mailbox"], new["search"], new["mail_folder"])
+    conn.execute("UPDATE waits SET mailbox=?, search=?, mail_folder=?, mail_to=? WHERE id=?",
+                 (new["mailbox"], new["search"], new["mail_folder"], new["mail_to"], wait_id))
+    conn.commit()
+    print(f"wait#{wait_id} 邮件: [{new['mailbox'] or '?'}/{new['mail_folder'] or '?'}] {new['search']}"
+          + (f"  → {new['mail_to']}" if new["mail_to"] else ""))
+
+
+def op_brief(conn, code, text=None, session=None):
+    p = find_project(conn, code)
+    if text is not None:
+        conn.execute("UPDATE projects SET brief=? WHERE id=?", (text.strip(), p["id"]))
+    if session is not None:
+        sess = session.strip()
+        if sess and "://" not in sess:  # 只给了 session id
+            sess = "claude://claude.ai/epitaxy/" + sess
+        conn.execute("UPDATE projects SET session=? WHERE id=?", (sess, p["id"]))
+    conn.commit()
+    p = find_project(conn, p["code"])
+    print(f"[{p['code']}] 背景: {p['brief'] or '—'}" + (f"\n  session: {p['session']}" if p["session"] else ""))
 
 
 def op_done(conn, wait_id, note=""):
@@ -455,12 +508,19 @@ def cmd_show(args):
     p = find_project(conn, args.code)
     print(f"[{p['code']}] {p['title']}")
     print(f"  部门: {p['dept'] or '—'}  类别: {p['category'] or '—'}  阶段: {p['stage'] or '—'}  状态: {p['status']}")
+    if p["brief"]:
+        print(f"  背景: {p['brief']}")
+    if p["session"]:
+        print(f"  session: {p['session']}")
     for w in conn.execute(
         "SELECT * FROM waits WHERE project_id=? AND done=0 ORDER BY id", (p["id"],)
     ):
         who = f" @{w['who']}" if w["who"] else ""
         nudge = f", {w['nudged_at']}催过" if w["nudged_at"] else ""
         print(f"  wait#{w['id']} {PARTY_CN[w['party']]}{who}: {w['what']} (自{w['since']}{nudge}, {wait_age(w)}天)")
+        if w["search"]:
+            print(f"      邮件 [{w['mailbox'] or '?'}/{w['mail_folder'] or '?'}] {w['search']}"
+                  + (f"  → {w['mail_to']}" if w["mail_to"] else ""))
     for d in conn.execute(
         "SELECT * FROM decisions WHERE project_id=? AND consumed_at IS NULL ORDER BY id", (p["id"],)
     ):
@@ -528,6 +588,29 @@ def cmd_depts(args):
     print(f"  {'(未分)':<10} 进行中 {counts.get('', 0)}")
 
 
+def project_ctx(conn, pid, cache):
+    """/boss 卡片用的项目上下文：背景、阶段、全部未完成等待项、时间线、链接。"""
+    if pid in cache:
+        return cache[pid]
+    p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+    refs = [dict(r) for r in conn.execute(
+        "SELECT label, target FROM refs WHERE project_id=? ORDER BY id", (pid,))]
+    session = p["session"] or next((r["target"] for r in refs if r["target"].startswith("claude://")), "")
+    ctx = {
+        "code": p["code"], "title": p["title"], "dept": p["dept"] or "", "stage": p["stage"] or "",
+        "brief": p["brief"] or "", "session": session,
+        "links": [r for r in refs if r["target"].startswith(("http://", "https://"))],
+        "waits": [{"id": w["id"], "party": w["party"], "party_cn": PARTY_CN[w["party"]], "who": w["who"],
+                   "what": w["what"], "age": wait_age(w)} for w in conn.execute(
+            "SELECT * FROM waits WHERE project_id=? AND done=0 ORDER BY id", (pid,))],
+        "events": [{"ts": e["ts"], "text": e["text"]} for e in conn.execute(
+            "SELECT ts, text FROM events WHERE project_id=? AND text NOT LIKE 'dept: %' "
+            "ORDER BY ts DESC, id DESC LIMIT 40", (pid,))],
+    }
+    cache[pid] = ctx
+    return ctx
+
+
 def boss_state(conn):
     """/boss 页面数据：部门统计 + 待审草稿 + 待决定 + 待意见 + 其他轮到我。"""
     pat = [x for x in get_setting(conn, "draft_review_pattern", "审核发出").split("|") if x]
@@ -539,7 +622,7 @@ def boss_state(conn):
     stats = {d["code"]: {"code": d["code"], "name": d["name"], "me": 0, "internal": 0, "external": 0}
              for d in depts}
     stats_other = {"code": "", "name": "未分部门", "me": 0, "internal": 0, "external": 0}
-    drafts, other_me = [], []
+    drafts, other_me, cache = [], [], {}
     for w in rows:
         bucket = stats[w["dept"]] if w["dept"] in known else stats_other
         key = {"me": "me", "internal": "internal"}.get(w["party"], "external")
@@ -547,7 +630,9 @@ def boss_state(conn):
         if w["party"] != "me":
             continue
         item = {"id": w["id"], "code": w["code"], "title": w["title"], "dept": w["dept"] or "",
-                "who": w["who"], "what": w["what"], "since": w["since"], "age": wait_age(w)}
+                "who": w["who"], "what": w["what"], "since": w["since"], "age": wait_age(w),
+                "mailbox": w["mailbox"], "search": w["search"], "mail_folder": w["mail_folder"],
+                "mail_to": w["mail_to"], "project": project_ctx(conn, w["project_id"], cache)}
         (drafts if any(k in w["what"] for k in pat) else other_me).append(item)
     stat_list = list(stats.values())
     if any(stats_other[k] for k in ("me", "internal", "external")) or not depts:
@@ -558,6 +643,7 @@ def boss_state(conn):
             "WHERE d.consumed_at IS NULL AND p.status='active' ORDER BY d.id"):
         x = dict(d)
         x["options"] = json.loads(d["options"] or "[]")
+        x["project"] = project_ctx(conn, d["project_id"], cache)
         decs.append(x)
     return {
         "now": now(), "stale_days": int(get_setting(conn, "stale_days", "5")),
@@ -616,7 +702,9 @@ def cmd_serve(args):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            # 分块写：本机(Windows)上一次 sendall 超过约 512KB 会卡 19 秒后被对端重置，分块就没事
+            for i in range(0, len(data), 65536):
+                self.wfile.write(data[i:i + 65536])
 
         def do_GET(self):
             if self.path in ("/", "/index.html"):
@@ -671,7 +759,9 @@ def cmd_serve(args):
                         "sent": lambda: op_sent(conn, int(a["id"])),
                         "answer": lambda: op_answer(conn, int(a["id"]), a.get("answer", "")),
                         "wait": lambda: op_wait(conn, a["code"], a["party"], a["what"], a.get("who", ""),
-                                                a.get("since"), a.get("clear", False), quiet=True),
+                                                a.get("since"), a.get("clear", False), quiet=True,
+                                                mailbox=a.get("mailbox", ""), search=a.get("search", ""),
+                                                folder=a.get("mail_folder", ""), mail_to=a.get("mail_to", "")),
                         "done": lambda: op_done(conn, a["id"], a.get("note", "")),
                         "nudge": lambda: op_nudge(conn, a["id"], a.get("note", "")),
                         "log": lambda: op_log(conn, a["code"], a["text"]),
@@ -735,7 +825,23 @@ def main():
     s.add_argument("code"); s.add_argument("party", choices=PARTIES); s.add_argument("what")
     s.add_argument("--who", default=""); s.add_argument("--since")
     s.add_argument("--clear", action="store_true", help="先了结该项目所有未完成等待项")
-    s.set_defaults(f=lambda a: op_wait(db(), a.code, a.party, a.what, a.who, a.since, a.clear))
+    s.add_argument("--mail", default="", help="邮件所在邮箱(如 qt / tt)")
+    s.add_argument("--search", default="", help="能搜到那封邮件的搜索串, 如 'subject:\"Re: xxx\"'")
+    s.add_argument("--folder", default="", choices=MAIL_FOLDERS, help="inbox / drafts / sent")
+    s.add_argument("--to", default="", help="草稿的实际收件人")
+    s.set_defaults(f=lambda a: op_wait(db(), a.code, a.party, a.what, a.who, a.since, a.clear,
+                                       mailbox=a.mail, search=a.search, folder=a.folder, mail_to=a.to))
+
+    s = sub.add_parser("wait-mail", help="给已有等待项补/改邮件定位信息")
+    s.add_argument("id", type=int)
+    s.add_argument("--mail"); s.add_argument("--search")
+    s.add_argument("--folder", choices=MAIL_FOLDERS); s.add_argument("--to")
+    s.set_defaults(f=lambda a: op_wait_mail(db(), a.id, a.mail, a.search, a.folder, a.to))
+
+    s = sub.add_parser("brief", help="设置/查看项目背景(2-3 行: 什么事/谁/要什么), 也可挂 session 链接")
+    s.add_argument("code"); s.add_argument("text", nargs="?")
+    s.add_argument("--session", help="项目 session 链接或 session id")
+    s.set_defaults(f=lambda a: op_brief(db(), a.code, a.text, a.session))
 
     s = sub.add_parser("done", help="完成等待项")
     s.add_argument("id", type=int); s.add_argument("note", nargs="?", default="")
